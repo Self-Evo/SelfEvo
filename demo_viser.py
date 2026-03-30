@@ -361,6 +361,7 @@ parser.add_argument("--sparse", action="store_true", help="keep ~10% frames (but
 parser.add_argument("--min_keep", type=int, default=2, help="when --sparse, keep at least this many frames")
 parser.add_argument("--cache", action="store_true", help="Save/load predictions cache (.npz)")
 parser.add_argument("--cache_path", type=str, default=None, help="Explicit cache .npz path (optional)")
+parser.add_argument("--model", type=str, default="facebook/VGGT-1B", help="HuggingFace model repo ID to load (e.g. facebook/VGGT-1B or Changearthmore/SelfEvoVGGT)")
 
 def save_full_predictions_npz(cache_path: str, pred_np: dict, image_names: list, ckpt_path: str):
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -431,12 +432,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    print("Initializing and loading VGGT model...")
-    # model = VGGT.from_pretrained("facebook/VGGT-1B")
-
-    model = VGGT()
-    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    print(f"Initializing and loading VGGT model from {args.model}...")
+    model = VGGT.from_pretrained(args.model)
 
     model.eval()
     model = model.to(device)

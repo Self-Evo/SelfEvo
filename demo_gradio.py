@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import argparse
 import os
 import cv2
 import torch
@@ -15,6 +16,10 @@ from datetime import datetime
 import glob
 import gc
 import time
+
+parser = argparse.ArgumentParser(description="VGGT Gradio demo")
+parser.add_argument("--model", type=str, default="facebook/VGGT-1B", help="HuggingFace model repo ID to load (e.g. facebook/VGGT-1B or Changearthmore/SelfEvoVGGT)")
+args, _ = parser.parse_known_args()
 
 sys.path.append("vggt/")
 
@@ -39,12 +44,8 @@ def sort_by_index(paths):
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-print("Initializing and loading VGGT model...")
-# model = VGGT.from_pretrained("facebook/VGGT-1B")  # another way to load the model
-
-model = VGGT()
-_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+print(f"Initializing and loading VGGT model from {args.model}...")
+model = VGGT.from_pretrained(args.model)
 
 
 model.eval()

@@ -1,6 +1,6 @@
 # SelfEvo: Self-Improving 4D Perception via Self-Distillation
 
-[**Paper**](#citation) | [**VGGT Model**](https://huggingface.co/facebook/VGGT-1B)
+[**Paper**](#citation) | [**VGGT Model**](https://huggingface.co/facebook/VGGT-1B) | [**SelfEvo Model**](https://huggingface.co/Changearthmore/SelfEvoVGGT)
 
 **[Nan Huang](https://nnanhuang.github.io/)<sup>1,2,\*</sup>, [Pengcheng Yu](https://github.com/yupengchengg147)<sup>2,4,\*</sup>, [Weijia Zeng](https://fantasticoven2.github.io/)<sup>6</sup>, [James M. Rehg](https://rehg.org/)<sup>1</sup>, [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/)<sup>5</sup>, [Haiwen Feng](https://havenfeng.github.io/)<sup>2,5,†</sup>, [Qianqian Wang](https://qianqianwang68.github.io/)<sup>3,†</sup>**
 
@@ -20,17 +20,29 @@ SelfEvo achieves up to **36.5% relative improvement** in video depth estimation 
 
 ## Interactive Demo
 
-Try the interactive Gradio demo for base VGGT inference on your own images or videos:
+Try the interactive Gradio demo on your own images or videos.
 
+**Pretrained VGGT-1B:**
 ```bash
 pip install -r requirements_demo.txt
-python demo_gradio.py
+python demo_gradio.py --model facebook/VGGT-1B
+```
+
+**SelfEvo (self-improved):**
+```bash
+python demo_gradio.py --model Changearthmore/SelfEvoVGGT
 ```
 
 For 3D visualization with [Viser](https://viser.studio/):
 
+**Pretrained VGGT-1B:**
 ```bash
-python demo_viser.py
+python demo_viser.py --model facebook/VGGT-1B --image_folder examples/kitchen/images/
+```
+
+**SelfEvo (self-improved):**
+```bash
+python demo_viser.py --model Changearthmore/SelfEvoVGGT --image_folder examples/kitchen/images/
 ```
 
 ## Installation
@@ -62,9 +74,9 @@ pip install -e .
 pip install -r requirements_demo.txt
 ```
 
-## Pretrained Model
+## Pretrained Models
 
-Download the pretrained VGGT-1B checkpoint from HuggingFace:
+**Base VGGT-1B** (pretrained):
 
 ```python
 from huggingface_hub import hf_hub_download
@@ -74,6 +86,18 @@ hf_hub_download(repo_id="facebook/VGGT-1B", filename="model.pt", local_dir="ckpt
 Or via CLI:
 ```bash
 huggingface-cli download facebook/VGGT-1B model.pt --local-dir ckpt/
+```
+
+**SelfEvo (VGGT)** — self-improved checkpoint:
+
+```python
+from huggingface_hub import hf_hub_download
+hf_hub_download(repo_id="Changearthmore/SelfEvoVGGT", filename="model.pt", local_dir="ckpt/selfevo/")
+```
+
+Or via CLI:
+```bash
+huggingface-cli download Changearthmore/SelfEvoVGGT model.pt --local-dir ckpt/selfevo/
 ```
 
 Update `checkpoint.resume_checkpoint_path` in your config to point to the downloaded checkpoint.
