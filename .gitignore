@@ -157,7 +157,6 @@ skyseg.onnx
 
 *.pyc
 .DS_Store
-examples
 visulization
 plots
 
