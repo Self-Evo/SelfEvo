@@ -213,7 +213,7 @@ def load_depth(depthpath):
     return depthmap, valid
 
 class WildFramesFolderDataset(BaseDataset):
-    “””
+    """
     Reads sequences from a pre-extracted frame directory:
     - Each subdirectory under ROOT_DIR is treated as one video sequence.
     - Each subdirectory contains frame images (png/jpg/...) and an optional fps.txt.
@@ -222,7 +222,7 @@ class WildFramesFolderDataset(BaseDataset):
 
     Sampling parameters:
     - fix_img_num: -1 means variable; >0 fixes the number of sampled frames (uniform/random).
-    “””
+    """
     def __init__(
         self,
         common_conf,
@@ -231,7 +231,6 @@ class WildFramesFolderDataset(BaseDataset):
         seq_glob: str = "*",
         len_train: int = 100000,
         len_test: int = 10000,
-        robo: bool = False,
         game: bool = False,
         subdir_name: str = "color",
         metadata_csv: str | None = None,
@@ -272,7 +271,6 @@ class WildFramesFolderDataset(BaseDataset):
 
         self.ROOT_DIR = ROOT_DIR
         self.seq_glob = seq_glob
-        self.robo = robo
         self.game = game
         self.subdir_name = subdir_name
 
@@ -345,9 +343,6 @@ class WildFramesFolderDataset(BaseDataset):
                 if self.debug and len(self.sequence_list) > 1:
                     break
 
-        elif self.robo is True:
-            seq_txt = "/home/nan.huang/code/vggt/training/data/sequence_list.txt"
-            self._load_sequences_from_txt(seq_txt)
         else:
             min_frames, high = self.img_nums
 

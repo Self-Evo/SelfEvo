@@ -3,7 +3,7 @@ defaults:
 
 exp_name: default
 img_size: 518
-num_workers: 8
+num_workers: 1
 seed_value: 42
 accum_steps: 1    # We did not use gradient accumulation in our training, while if you suffer from OOM, you can try to use it.
 patch_size: 14
@@ -34,7 +34,6 @@ data:
     num_workers: ${num_workers}
     max_img_per_gpu: ${max_img_per_gpu}
     common_config:
-      # img_nums: [12, 16]
       img_nums: [24, 64]
       img_size: ${img_size}
       patch_size: ${patch_size}
@@ -47,7 +46,6 @@ data:
           split: train
           ROOT_DIR: /home/ed25519/data/OmniWorld/data/OmniWorld-Game
           frame_stride: 1
-          robo: False
 
   val:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
@@ -60,22 +58,12 @@ data:
     dataset:
       _target_: data.composed_dataset.ComposedDataset
       dataset_configs:
+        # we don't run validation
         - _target_: data.datasets.wild.WildFramesFolderDataset
           split: test
           ROOT_DIR: /home/ed25519/ShareGPT4Video/val
           frame_stride: 1
         
-        # - _target_: data.datasets.wild.WildVideoFolderDataset
-        #   split: test
-        #   ROOT_DIR: /mnt/data/haven_berkeley/projects/video_data/ShareGPT4Video/zip_folder/pexels/pexels_videos_4
-        #   video_glob: "**/*.mp4"     # recursive glob
-        #   use_all_frames_for_teacher: true
-        #   frame_stride: 1
-        #   teacher_max_frames: 24  # uniform downsample for long videos
-        #   fix_img_num: -1
-        #   sampling: uniform
-        #   ts_return_2f_indices: true
-        #   two_frame_strategy: first_last
 
 
 logging:
@@ -115,7 +103,7 @@ logging:
 checkpoint:
   save_dir: logs/${exp_name}/ckpts
   save_freq: 1
-  resume_checkpoint_path: /home/ed25519/code/vggt/ckpt/model.pt
+  resume_checkpoint_path: /home/nan.huang/code/vggt-exp/ckpt/model.pt
   strict: False
 
 

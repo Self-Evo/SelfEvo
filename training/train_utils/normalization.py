@@ -120,10 +120,10 @@ def normalize_camera_extrinsics_and_points_batch_gpu(
     scale_by_points: bool = True,
     point_masks: torch.Tensor = None,
 ):
-    “””
+    """
     GPU version of normalize_camera_extrinsics_and_points_batch from VGGT:
     identical logic except the CPU-only assert is removed.
-    “””
+    """
     check_valid_tensor(extrinsics, "extrinsics")
     check_valid_tensor(cam_points, "cam_points")
     check_valid_tensor(world_points, "world_points")

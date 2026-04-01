@@ -41,6 +41,7 @@ from train_utils.checkpoint import DDPCheckpointSaver
 from train_utils.distributed import get_machine_local_and_dist_rank
 from train_utils.freeze import freeze_modules
 from train_utils.general import *
+from train_utils.general import _slice_pred_dict, _sample_dis_imgs
 from train_utils.logging import setup_logging
 from train_utils.normalization import *
 from train_utils.optimizer import construct_optimizers
@@ -1922,7 +1923,7 @@ class Trainer:
             
             # --- Crop augmentation (harder student input) ---
             # Synchronously crops images/images_aug + depths/conf/masks + K->K'
-            if getattr(self, “crop_cfg”, None) and self.crop_cfg.enabled and (phase == “train”):
+            if getattr(self, "crop_cfg", None) and self.crop_cfg.enabled and (phase == "train"):
                 # When rep_enabled: teacher_fs comes from un-cropped teacher tokens -> domain mismatch.
                 # Avoid enabling rep_enabled + crop simultaneously, or align by also cropping teacher.
                 if not self.rep_enabled:

@@ -27,21 +27,14 @@ conda create -n selfevo python=3.10
 conda activate selfevo
 ```
 
-**2. Install PyTorch (install separately to match your CUDA version):**
-
-```bash
-# CUDA 12.1
-pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
-```
-
-**3. Install training dependencies:**
+**2. Install training dependencies:**
 
 ```bash
 pip install -r requirements.txt
 pip install -e .
 ```
 
-**4. (Optional) Install demo dependencies:**
+**3. (Optional) Install demo dependencies:**
 
 ```bash
 pip install -r requirements_demo.txt
@@ -137,7 +130,8 @@ Evaluation benchmarks: Sintel, KITTI, Bonn (video depth); RealEstate10K (camera)
 Launch self-distillation training with `torchrun` (DDP):
 
 ```bash
-torchrun --nproc_per_node=<NUM_GPUS> training/launch.py \
+cd training
+torchrun --nproc_per_node=<NUM_GPUS> launch.py \
     --config default
 ```
 
