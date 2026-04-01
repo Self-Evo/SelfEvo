@@ -1,6 +1,6 @@
 # SelfEvo: Self-Improving 4D Perception via Self-Distillation
 
-[**Paper**](#citation) | [**VGGT Model**](https://huggingface.co/facebook/VGGT-1B) | [**SelfEvo Model**](https://huggingface.co/Changearthmore/SelfEvoVGGT)
+[**Arxiv**](#citation) | [**Website**](https://self-evo.github.io/) | [**SelfEvo Model**](https://huggingface.co/Changearthmore/SelfEvoVGGT)
 
 **[Nan Huang](https://nnanhuang.github.io/)<sup>1,2,\*</sup>, [Pengcheng Yu](https://github.com/yupengchengg147)<sup>2,4,\*</sup>, [Weijia Zeng](https://fantasticoven2.github.io/)<sup>6</sup>, [James M. Rehg](https://rehg.org/)<sup>1</sup>, [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/)<sup>5</sup>, [Haiwen Feng](https://havenfeng.github.io/)<sup>2,5,†</sup>, [Qianqian Wang](https://qianqianwang68.github.io/)<sup>3,†</sup>**
 
@@ -16,34 +16,7 @@ SelfEvo achieves up to **36.5% relative improvement** in video depth estimation 
 
 ## Updates
 
-- **[2026-03]** Paper and code released.
-
-## Interactive Demo
-
-Try the interactive Gradio demo on your own images or videos.
-
-**Pretrained VGGT-1B:**
-```bash
-pip install -r requirements_demo.txt
-python demo_gradio.py --model facebook/VGGT-1B
-```
-
-**SelfEvo (self-improved):**
-```bash
-python demo_gradio.py --model Changearthmore/SelfEvoVGGT
-```
-
-For 3D visualization with [Viser](https://viser.studio/):
-
-**Pretrained VGGT-1B:**
-```bash
-python demo_viser.py --model facebook/VGGT-1B --image_folder examples/kitchen/images/
-```
-
-**SelfEvo (self-improved):**
-```bash
-python demo_viser.py --model Changearthmore/SelfEvoVGGT --image_folder examples/kitchen/images/
-```
+- **[2026-04]** Paper and code released.
 
 ## Installation
 
@@ -101,6 +74,33 @@ huggingface-cli download Changearthmore/SelfEvoVGGT model.pt --local-dir ckpt/se
 ```
 
 Update `checkpoint.resume_checkpoint_path` in your config to point to the downloaded checkpoint.
+
+## Interactive Demo
+
+Try the interactive Gradio demo on your own images or videos.
+
+**Pretrained VGGT-1B:**
+```bash
+pip install -r requirements_demo.txt
+python demo_gradio.py --model facebook/VGGT-1B
+```
+
+**SelfEvo (self-improved):**
+```bash
+python demo_gradio.py --model Changearthmore/SelfEvoVGGT
+```
+
+For 3D visualization with [Viser](https://viser.studio/):
+
+**Pretrained VGGT-1B:**
+```bash
+python demo_viser.py --model facebook/VGGT-1B --image_folder examples/drift-chicane/
+```
+
+**SelfEvo (self-improved):**
+```bash
+python demo_viser.py --model Changearthmore/SelfEvoVGGT --image_folder examples/drift-chicane/
+```
 
 ## Data Preparation
 
@@ -175,10 +175,6 @@ The primary config is at `training/config/default.yaml`. It uses [Hydra](https:/
 
 Evaluation scripts for video depth and camera estimation will be released soon.
 
-The paper evaluates on:
-- **Video depth**: Absolute Relative Error (AbsRel), δ < 1.25 under scale and scale+shift alignment
-- **Camera estimation**: AUC of min(RRA, RTA) at 5°, 15°, 30° thresholds
-- Benchmarks: OmniGeo, OmniVideo (OmniWorld-Game), Sintel, KITTI, Bonn, RealEstate10K, DROID, HOI4D
 
 ## Citation
 

@@ -21,7 +21,7 @@ from typing import Dict, Iterable, List
 
 from collections import defaultdict
 from dataclasses import fields, is_dataclass
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 
 
@@ -367,3 +367,141 @@ def get_rank():
     return dist.get_rank()
 
 
+# ---------------------------------------------------------------------------
+# Helper utilities extracted from trainer.py
+# ---------------------------------------------------------------------------
+
+def _unwrap_module(m: torch.nn.Module) -> torch.nn.Module:
+    while hasattr(m, "module"):
+        m = m.module
+    return m
+
+
+def _minmax_norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-12) -> torch.Tensor:
+    x = x.to(dtype=torch.float32)
+    valid = torch.isfinite(x)
+    has_valid = valid.any(dim=dim, keepdim=True)
+
+    # compute min/max only over valid (finite) values
+    x_for_min = torch.where(valid, x, torch.full_like(x, float("inf")))
+    x_for_max = torch.where(valid, x, torch.full_like(x, float("-inf")))
+    mn = x_for_min.min(dim=dim, keepdim=True).values
+    mx = x_for_max.max(dim=dim, keepdim=True).values
+
+    denom = mx - mn
+    denom_ok = denom > eps
+
+    # avoid division by zero: substitute 1 where denom is invalid (denom_ok will zero those rows)
+    denom_safe = torch.where(denom_ok, denom, torch.ones_like(denom))
+
+    y = (x - mn) / denom_safe
+    y = torch.where(valid & has_valid & denom_ok, y, torch.zeros_like(y))
+    return y
+
+
+def _gather_BS(x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    """
+    x:  (B,S,...)  idx: (B,L)
+    out:(B,L,...)
+    """
+    assert x.ndim >= 2
+    B, S = x.shape[:2]
+    assert idx.ndim == 2 and idx.shape[0] == B
+    L = idx.shape[1]
+
+    view_shape = (B, L) + (1,) * (x.ndim - 2)
+    expand_shape = (B, L) + x.shape[2:]
+    idx_exp = idx.view(view_shape).expand(expand_shape)
+    return x.gather(dim=1, index=idx_exp)
+
+
+def _slice_pred_dict(pred, L_sup: int, L_total: int):
+    """
+    Slice all tensors in pred whose second dimension equals L_total down to [:, :L_sup].
+    Recursively handles list/tuple/dict.
+    """
+    if torch.is_tensor(pred):
+        # only slice tensors shaped (B, L_total, ...)
+        if pred.dim() >= 2 and pred.size(1) == L_total:
+            return pred[:, :L_sup]
+        return pred
+
+    if isinstance(pred, dict):
+        return {k: _slice_pred_dict(v, L_sup, L_total) for k, v in pred.items()}
+
+    if isinstance(pred, (list, tuple)):
+        out = [_slice_pred_dict(v, L_sup, L_total) for v in pred]
+        return type(pred)(out)
+
+    # other types (float/int/None/str...) returned as-is
+    return pred
+
+
+def _sample_dis_imgs(dis_imgs: torch.Tensor, L_sup: int) -> torch.Tensor:
+    """
+    dis_imgs: (B, D, C, H, W)
+    return:   (B, L_sup, C, H, W)  randomly sample L_sup from D; sample with replacement if D < L_sup
+    """
+    B, D, C, H, W = dis_imgs.shape
+    if D == 0:
+        # no distractors: return empty (caller will skip)
+        return dis_imgs
+
+    if D >= L_sup:
+        # without replacement: same indices for whole batch (simple and fast)
+        idx = torch.randperm(D, device=dis_imgs.device)[:L_sup]
+        return dis_imgs.index_select(1, idx)
+    else:
+        # with replacement: sample L_sup indices
+        idx = torch.randint(0, D, (L_sup,), device=dis_imgs.device)
+        # use gather for batch alignment
+        idx_g = idx.view(1, L_sup, 1, 1, 1).expand(B, L_sup, C, H, W)
+        return dis_imgs.gather(1, idx_g)
+
+
+def chunk_batch_for_accum_steps(batch: Mapping, accum_steps: int) -> List[Mapping]:
+    """Splits a batch into smaller chunks for gradient accumulation."""
+    if accum_steps == 1:
+        return [batch]
+    return [get_chunk_from_data(batch, i, accum_steps) for i in range(accum_steps)]
+
+
+def is_sequence_of_primitives(data: Any) -> bool:
+    """Checks if data is a sequence of primitive types (str, int, float, bool)."""
+    return (
+        isinstance(data, Sequence)
+        and not isinstance(data, str)
+        and len(data) > 0
+        and isinstance(data[0], (str, int, float, bool))
+    )
+
+
+def get_chunk_from_data(data: Any, chunk_id: int, num_chunks: int) -> Any:
+    """
+    Recursively splits tensors and sequences within a data structure into chunks.
+
+    Args:
+        data: The data structure to split (e.g., a dictionary of tensors).
+        chunk_id: The index of the chunk to retrieve.
+        num_chunks: The total number of chunks to split the data into.
+
+    Returns:
+        A chunk of the original data structure.
+    """
+    if isinstance(data, torch.Tensor) or is_sequence_of_primitives(data):
+        # either a tensor or a list of primitive objects
+        start = (len(data) // num_chunks) * chunk_id
+        end = (len(data) // num_chunks) * (chunk_id + 1)
+        return data[start:end]
+    elif isinstance(data, Mapping):
+        return {
+            key: get_chunk_from_data(value, chunk_id, num_chunks)
+            for key, value in data.items()
+        }
+    elif isinstance(data, str):
+        # NOTE: this is a hack to support string keys in the batch
+        return data
+    elif isinstance(data, Sequence):
+        return [get_chunk_from_data(value, chunk_id, num_chunks) for value in data]
+    else:
+        return data

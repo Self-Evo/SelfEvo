@@ -68,10 +68,10 @@ data:
         # - _target_: data.datasets.wild.WildVideoFolderDataset
         #   split: test
         #   ROOT_DIR: /mnt/data/haven_berkeley/projects/video_data/ShareGPT4Video/zip_folder/pexels/pexels_videos_4
-        #   video_glob: "**/*.mp4"     # 递归匹配
+        #   video_glob: "**/*.mp4"     # recursive glob
         #   use_all_frames_for_teacher: true
         #   frame_stride: 1
-        #   teacher_max_frames: 24  # 视频很长时做均匀下采样
+        #   teacher_max_frames: 24  # uniform downsample for long videos
         #   fix_img_num: -1
         #   sampling: uniform
         #   ts_return_2f_indices: true
@@ -143,7 +143,7 @@ optim:
   ema:
     enabled: true
     decay: 0.995
-    use_ema_for_eval: true # 验证用 EMA 前向
+    use_ema_for_eval: true # use EMA model for validation forward pass
   param_group_modifiers: False
 
   optimizer:

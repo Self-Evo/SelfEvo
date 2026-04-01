@@ -36,8 +36,8 @@ import re
 def sort_by_index(paths):
     def extract_idx(p):
         filename = os.path.basename(p)
-        stem, _ = os.path.splitext(filename)  # 去掉后缀
-        # 找“结尾处的数字”
+        stem, _ = os.path.splitext(filename)
+        # Find trailing digits in filename stem
         m = re.search(r'(\d+)$', stem)
         if not m:
             return float('inf')
@@ -119,9 +119,9 @@ def viser_wrapper(
 
     def select_top_by_rank(drop_percent: float, frame_value: str) -> np.ndarray:
         """
-        drop_percent: 0~100，表示丢掉最差的 drop_percent%
-        frame_value: "All" 或者某一帧的字符串编号
-        返回：要保留的点的 index（一维 index，对应 points_centered/colors_flat 的第一维）
+        drop_percent: 0~100, percentage of worst points to drop (e.g. 50 drops the lowest 50%)
+        frame_value: "All" or a string frame index
+        Returns: 1-D index array of points to keep (indexing into points_centered/colors_flat first dim)
         """
         if frame_value == "All":
             cand = np.nonzero(valid)[0]
@@ -143,7 +143,7 @@ def viser_wrapper(
 
         key = frame_value
         if key not in sorted_cache:
-            c = conf_flat[cand] + 1e-12 * (cand.astype(np.float64) % 1000003)  # 可选 tie-break
+            c = conf_flat[cand] + 1e-12 * (cand.astype(np.float64) % 1000003)  # optional tie-break
             order = np.argsort(c, kind="stable")   # low -> high
             sorted_cache[key] = cand[order]
 
@@ -373,7 +373,7 @@ def save_full_predictions_npz(cache_path: str, pred_np: dict, image_names: list,
         elif isinstance(v, (int, float, bool, str)):
             payload[k] = np.array(v)
         else:
-            # 尽量不动你现有逻辑；真遇到非数组/非标量就跳过并提示
+            # Skip non-array/non-scalar values
             print(f"[cache] skip key={k}, type={type(v)} (not ndarray/scalar)")
 
     payload["__image_names__"] = np.array(image_names)
@@ -474,7 +474,7 @@ def main():
         predictions["extrinsic"] = extrinsic
         predictions["intrinsic"] = intrinsic
 
-        # ✅ 最小但关键：保证 pred_dict 里一定有 images（你后面可视化要用）
+        # Ensure pred_dict always contains images for visualization
         predictions["images"] = images
 
         print("Processing model outputs...")
@@ -486,7 +486,7 @@ def main():
                 for key, v in predictions.items():
                     if isinstance(v, torch.Tensor):
                         arr = v.detach().cpu().numpy()
-                        # 只在第一维确实是 1 的时候才去掉 batch 维
+                        # Only squeeze batch dim when it is exactly 1
                         if arr.ndim > 0 and arr.shape[0] == 1:
                             arr = arr.squeeze(0)
                         predictions_np[key] = arr
@@ -494,7 +494,7 @@ def main():
                         predictions_np[key] = v
 
             else:
-                # 一般不会走到这，但保留
+                # Fallback: should rarely be reached
                 predictions_np[key] = predictions[key]
 
         if args.cache:

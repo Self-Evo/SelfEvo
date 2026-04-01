@@ -34,8 +34,8 @@ import re
 def sort_by_index(paths):
     def extract_idx(p):
         filename = os.path.basename(p)
-        stem, _ = os.path.splitext(filename)  # 去掉后缀
-        # 找“结尾处的数字”
+        stem, _ = os.path.splitext(filename)
+        # Find trailing digits in filename stem
         m = re.search(r'(\d+)$', stem)
         if not m:
             return float('inf')

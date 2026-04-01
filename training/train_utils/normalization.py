@@ -120,11 +120,10 @@ def normalize_camera_extrinsics_and_points_batch_gpu(
     scale_by_points: bool = True,
     point_masks: torch.Tensor = None,
 ):
-    """
-    这是 VGGT 的 normalize_camera_extrinsics_and_points_batch 的 GPU 版本：
-    - 除了移除 “必须是 CPU” 的 assert，其余逻辑保持一致。
-    """
-    # ---- 原 VGGT：check_valid_tensor(...) 这些你项目里应该已经有 ----
+    “””
+    GPU version of normalize_camera_extrinsics_and_points_batch from VGGT:
+    identical logic except the CPU-only assert is removed.
+    “””
     check_valid_tensor(extrinsics, "extrinsics")
     check_valid_tensor(cam_points, "cam_points")
     check_valid_tensor(world_points, "world_points")
@@ -133,8 +132,7 @@ def normalize_camera_extrinsics_and_points_batch_gpu(
     B, S, _, _ = extrinsics.shape
     device = extrinsics.device
 
-    # ===== 改动点：删掉这行 =====
-    # assert device == torch.device("cpu")
+    # assert device == torch.device("cpu")  # removed: GPU version
 
     # Convert extrinsics to homogeneous form: (B,S,4,4)
     extrinsics_homog = torch.cat(

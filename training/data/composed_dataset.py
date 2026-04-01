@@ -155,7 +155,7 @@ class ComposedDataset(Dataset, ABC):
                     for i in range(len(dis_images)):
                         dis_images[i] = self.image_aug(dis_images[i])
 
-            # ===== teacher aug (NEW, 独立再采样一次) =====
+            # ===== teacher aug (NEW, independent re-sampling) =====
             images_aug2 = images_ori.detach().clone()
             if has_dis:
                 dis_images_aug2 = dis_images_ori.detach().clone()

@@ -25,7 +25,7 @@ def _strip_to_seq_base(rel_seq_dir: str) -> str | None:
     return:
     GuptaLab/failure/.../Thu_Apr_20_13:11:11_2023
     """
-    # 兼容末尾可能是 subdir_name 或直接 cam_dir
+    # Handle trailing subdir_name or cam_dir
     m = re.search(r"(.*)/recordings/PNG/[^/]+/?$", rel_seq_dir.replace("\\", "/"))
     if not m:
         return None
@@ -132,18 +132,18 @@ def _keep_by_view_filter(only_fixed, only_wrist, ROOT_DIR, droid_meta_root, seq_
 def make_dummy_intrinsic(image_shape, fov_deg=60.0):
     """
     image_shape: (H, W) or (H, W, C)
-    fov_deg: 假设的水平视场角（degree）
+    fov_deg: assumed horizontal field of view in degrees
     """
     if len(image_shape) == 3:
         H, W = image_shape[:2]
     else:
         H, W = image_shape
 
-    # principal point 在图像中心
+    # principal point at image center
     cx = W / 2.0
     cy = H / 2.0
 
-    # 根据 FOV 估算 focal length（单位：像素）
+    # estimate focal length (pixels) from FOV
     fov_rad = np.deg2rad(fov_deg)
     f = 0.5 * W / np.tan(fov_rad / 2.0)
 
@@ -157,7 +157,7 @@ def make_dummy_intrinsic(image_shape, fov_deg=60.0):
 
 def _natural_key(path: str):
     """
-    自然排序：frame_2.png < frame_10.png
+    Natural sort key: frame_2.png < frame_10.png
     """
     s = osp.basename(path)
     parts = _num_pat.split(s)
@@ -174,21 +174,21 @@ def _sample_indices(
 
     n = len(base_indices)
 
-    # 1) 随机选择 fixed_interval，并在必要时下调直到能放下
+    # 1) Randomly choose fixed_interval, reduce until all frames fit
     fixed_interval = rng.choice([0, 1, 2, 3, 4, 5])
     while True:
         stride = fixed_interval + 1
-        need = 1 + (img_per_seq - 1) * stride  # 放下k帧所需长度
+        need = 1 + (img_per_seq - 1) * stride  # frames needed to fit k samples
         if need <= n or fixed_interval == 0:
             break
-        fixed_interval -= 1  # 下调间隔
+        fixed_interval -= 1
 
     stride = fixed_interval + 1
-    # 2) 计算可选起点范围，并随机一个 start
+    # 2) Compute valid start range and sample a random start
     start_hi = n - need
     start = rng.randint(0, max(0, start_hi))
 
-    # 3) 在位置空间取，再映射回原始帧索引
+    # 3) Sample positions then map back to original frame indices
     pos = [start + t * stride for t in range(img_per_seq)]
     return [base_indices[p] for p in pos]
 
@@ -213,15 +213,16 @@ def load_depth(depthpath):
     return depthmap, valid
 
 class WildFramesFolderDataset(BaseDataset):
-    """
-    从“抽帧后的图片目录”读取序列：
-    - ROOT_DIR 下的每个子目录视为一个视频序列；
-    - 子目录内是若干帧图片（png/jpg…），可包含 fps.txt（可选，不用也行）；
-    - 保持与 WildVideoFolderDataset 相同的采样/两帧策略&返回结构，以便无缝替换。
+    “””
+    Reads sequences from a pre-extracted frame directory:
+    - Each subdirectory under ROOT_DIR is treated as one video sequence.
+    - Each subdirectory contains frame images (png/jpg/...) and an optional fps.txt.
+    - Sampling strategy and return structure are compatible with WildVideoFolderDataset
+      for seamless drop-in replacement.
 
-    采样相关参数保持一致：
-    - fix_img_num: -1 不固定；>0 固定采样 k 帧（uniform/random）
-    """
+    Sampling parameters:
+    - fix_img_num: -1 means variable; >0 fixes the number of sampled frames (uniform/random).
+    “””
     def __init__(
         self,
         common_conf,
@@ -275,7 +276,7 @@ class WildFramesFolderDataset(BaseDataset):
         self.game = game
         self.subdir_name = subdir_name
 
-        # 保存 split 参数
+        # save split parameters
         self.metadata_csv = metadata_csv
         self.test_csv = test_csv
         self.split_key = split_key
@@ -295,7 +296,7 @@ class WildFramesFolderDataset(BaseDataset):
                 eval_samples = []
                 for it in j.get("items", []):
                     uid = (it.get("UID") or it.get("seq") or "").strip()
-                    rel = self._resolve_rel_dir_for_uid(uid)  # 你之前实现的
+                    rel = self._resolve_rel_dir_for_uid(uid)
                     if rel is None:
                         continue
                     for fs in it.get("frame_sets", []):
@@ -303,8 +304,8 @@ class WildFramesFolderDataset(BaseDataset):
                         if ids:
                             eval_samples.append((rel, ids))
                 self.eval_samples = eval_samples
-                self.sequence_list = [s[0] for s in eval_samples]  # 可选
-                self.len_train = len(self.eval_samples)  # 让 __len__ 生效
+                self.sequence_list = [s[0] for s in eval_samples]
+                self.len_train = len(self.eval_samples)  # make __len__ return correct value
                 logging.info(f"[WildFrames][val_json] split={split}: eval_samples={len(self.eval_samples)}")
                 return
 
@@ -358,10 +359,10 @@ class WildFramesFolderDataset(BaseDataset):
                 if not osp.isdir(p):
                     continue
 
-                # seq_dir = 真正放图片的目录（兼容 subdir_name）
+                # seq_dir: actual image directory (handles optional subdir_name)
                 seq_dir = osp.join(p, subdir_name) if (subdir_name and osp.isdir(osp.join(p, subdir_name))) else p
 
-                # NEW: 只保留 fixed / wrist view
+                # NEW: only keep fixed / wrist view
                 if not _keep_by_view_filter(only_fixed, only_wrist, ROOT_DIR, droid_meta_root, seq_dir):
                     continue
 
@@ -522,7 +523,7 @@ class WildFramesFolderDataset(BaseDataset):
             return []
         if k >= n_total:
             return list(range(n_total))
-        # 均匀采样到 k 个
+        # uniformly sample k indices
         return [int(round(i * (n_total - 1) / (k - 1))) for i in range(k)]
 
     def _read_frame_rgb(self, img_path: str) -> Optional[np.ndarray]:
@@ -546,7 +547,7 @@ class WildFramesFolderDataset(BaseDataset):
                     break
 
     def _resize_letterbox(self, img: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
-        """保持比例缩放 + 居中填充到目标大小（与 wild-videos/simple 版本一致）"""
+        """Proportional resize + center pad to target size (consistent with wild-videos/simple version)."""
         th, tw = target_hw
         h, w = img.shape[:2]
         scale = min(tw / w, th / h)
@@ -563,7 +564,7 @@ class WildFramesFolderDataset(BaseDataset):
         abs_dir = osp.join(self.ROOT_DIR, seq_dir)
         for ext in IMG_EXTS:
             paths.extend(glob.glob(osp.join(abs_dir, f"*{ext}")))
-        # 自然排序，保证 frame_0001.png, frame_0010.png 顺序正确
+        # Natural sort ensures frame_0001.png < frame_0010.png ordering
         paths = sorted(paths, key=_natural_key)
         return paths
     
@@ -581,18 +582,18 @@ class WildFramesFolderDataset(BaseDataset):
         self,
         seq_index: int = None,
         img_per_seq: int = None,
-        seq_name: str = None,   # 若外部点名序列，可用 rel 目录名
-        ids: list = None,       # 可选：直接传入帧下标列表
+        seq_name: str = None,   # relative directory name if caller specifies a sequence
+        ids: list = None,       # optional: pass frame index list directly
         aspect_ratio: float = 1.0,
         return_distractors: bool = False,
         distractor_num: int = 12,
-        distractor_load_gt: bool = False,   # 干扰帧一般不需要读 depth，默认 False
+        distractor_load_gt: bool = False,   # distractors usually don't need depth; default False
     ) -> dict:
         if (not self.training) and hasattr(self, "eval_samples") and self.eval_samples:
             if seq_index is None:
                 seq_index = 0
             seq_name, ids = self.eval_samples[int(seq_index) % len(self.eval_samples)]
-        # 选一个序列目录
+        # Select a sequence directory
         if seq_name is not None:
             rel_dir = seq_name
         else:
@@ -606,14 +607,14 @@ class WildFramesFolderDataset(BaseDataset):
         if n_total == 0:
             raise RuntimeError(f"No images found in sequence: {osp.join(self.ROOT_DIR, rel_dir)}")
         
-        # 选帧下标
+        # Select frame indices
         if ids is not None and len(ids) > 0:
             chosen_idx = [i for i in ids if 0 <= i < n_total]
         else:
             if  self.fix_img_num == -1:
                 base = list(range(0, n_total, self.frame_stride))
 
-                # 在 base（已考虑 frame_stride 的可用帧集合）上采样一组满足跨度约束的索引
+                # Sample indices from base (respects frame_stride) satisfying span constraints
                 chosen_idx = _sample_indices(
                     base_indices=base,
                     img_per_seq =int(img_per_seq),
@@ -630,7 +631,7 @@ class WildFramesFolderDataset(BaseDataset):
                     else:
                         chosen_idx = sorted(random.sample(range(n_total), k))
 
-        # 目标尺寸
+        # Target image size
         target_image_shape = self.get_target_shape(aspect_ratio)
 
         images, original_sizes, frame_ids, used_img_paths = [], [], [], []
@@ -668,14 +669,14 @@ class WildFramesFolderDataset(BaseDataset):
         if frame_num == 0:
             raise RuntimeError(f"All chosen frames failed to load in {rel_dir}")
 
-        # 构造 batch，与视频版保持一致字段
+        # Build batch dict with same fields as video dataset version
         batch = {
-            "seq_name": rel_dir,                                   # 相对 ROOT_DIR 的子目录名
-            "ids": np.asarray(frame_ids, dtype=np.int64),          # 相对该序列的帧下标
+            "seq_name": rel_dir,                                   # relative subdirectory name under ROOT_DIR
+            "ids": np.asarray(frame_ids, dtype=np.int64),          # frame indices relative to the sequence
             "frame_num": frame_num,
             "images": images,                                       # list of (H,W,3) uint8
             "original_sizes": original_sizes,                       # list of [H0,W0]
-            "image_paths": used_img_paths,                          # 直接给出图片绝对路径
+            "image_paths": used_img_paths,                          # absolute paths to images
         }
 
         H, W = images[0].shape[:2]
@@ -692,12 +693,12 @@ class WildFramesFolderDataset(BaseDataset):
         batch["extrinsics"]   = [np.eye(4, dtype=np.float32) for _ in range(N)]
         batch["intrinsics"]   = [np.eye(3, dtype=np.float32) for _ in range(N)]
 
-        # ---------- 新增：distractors ----------
+        # ---------- distractors ----------
         if return_distractors and distractor_num > 0:
             d_rel = self._pick_other_seq(rel_dir, rng=random)
             d_img_paths_all = self._collect_images(d_rel)
             if len(d_img_paths_all) > 0:
-                # 采样 distractor_num 帧（用相同 _sample_indices，保证是“真实帧子序列”）
+                # Sample distractor_num frames (using the same _sample_indices for consistency)
                 base_d = list(range(0, len(d_img_paths_all), self.frame_stride))
                 d_idx = _sample_indices(base_indices=base_d, img_per_seq=int(distractor_num), rng=random)
 

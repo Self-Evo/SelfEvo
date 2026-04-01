@@ -5,39 +5,37 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-import torch.nn.functional as F
 
-
-# --- Environment Variable Setup for Performance and Debugging ---
-# Helps with memory fragmentation in PyTorch's memory allocator.
+# Environment Variable Setup for Performance and Debugging
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-# Specifies the threading layer for MKL, can prevent hangs in some environments.
 os.environ["MKL_THREADING_LAYER"] = "GNU"
-# Provides full Hydra stack traces on error for easier debugging.
 os.environ["HYDRA_FULL_ERROR"] = "1"
-# Enables asynchronous error handling for NCCL, which can prevent hangs.
 os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
 
-from eval.video_depth.launch import lauch_video_main
-from eval.video_depth.eval_depth import eval_video_main
-
 import contextlib
+import csv
 import gc
+import hashlib
 import json
 import logging
 import math
+import os.path as osp
+import random
 import time
+from dataclasses import dataclass
 from datetime import timedelta
-import datetime
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence
-
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision
+from dataclasses import dataclass
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn, update_bn
 
 from train_utils.checkpoint import DDPCheckpointSaver
 from train_utils.distributed import get_machine_local_and_dist_rank
@@ -46,1033 +44,25 @@ from train_utils.general import *
 from train_utils.logging import setup_logging
 from train_utils.normalization import *
 from train_utils.optimizer import construct_optimizers
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn, update_bn  # ✅ 2.3 官方 EMA
-
-from typing import Dict, Any
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-import subprocess
-from typing import Iterator, Optional, List, Tuple
 
-from typing import List, Optional
-from eval.videodepth.depth import depth_evaluation
-import math
-import random
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-
-import torch
-import torch.nn.functional as F
-from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple
-
-import os, os.path as osp, json, hashlib
-
-def _rep_feature_loss(
-    f_s: torch.Tensor,  # (B,L,C)
-    f_t: torch.Tensor,  # (B,L,C)
-    kind: str = "cosine",  # "cosine" | "smoothl1" | "mse" | "cosine_smoothl1"
-    smoothl1_beta: float = 0.05,
-    mix_alpha: float = 0.5,  # only for cosine_smoothl1
-) -> torch.Tensor:
-    f_s = f_s.float()
-    f_t = f_t.float()
-
-    if kind == "cosine":
-        f_s = F.normalize(f_s, dim=-1)
-        f_t = F.normalize(f_t, dim=-1)
-        return (2.0 - 2.0 * (f_s * f_t).sum(dim=-1)).mean()
-
-    if kind == "smoothl1":
-        return F.smooth_l1_loss(f_s, f_t, beta=smoothl1_beta)
-
-    if kind == "mse":
-        return F.mse_loss(f_s, f_t)
-
-    if kind == "cosine_smoothl1":
-        loss_cos = _rep_feature_loss(f_s, f_t, kind="cosine")
-        loss_l1  = _rep_feature_loss(f_s, f_t, kind="smoothl1", smoothl1_beta=smoothl1_beta)
-        return mix_alpha * loss_cos + (1.0 - mix_alpha) * loss_l1
-
-    raise ValueError(f"Unknown rep loss kind: {kind}")
-
-
-def _frame_rep_from_agg_tokens(
-    model: nn.Module,
-    agg_tokens,
-    images: torch.Tensor,   # (B,S,C,H,W)
-    layer: int,
-    global_feat_start: int = 1024,
-) -> torch.Tensor:
-    """
-    返回 per-frame feature: (B,S,C)
-    兼容 agg_tokens[layer] 是 (B,S,T,C) 或 (B,T,C)（后者会按 tokens_per_image reshape）
-    """
-    feat = agg_tokens[layer]  # expected token features
-    core = _unwrap_module(model)
-    aggregator = core.aggregator
-    patch_size = aggregator.patch_size
-    patch_start_idx = aggregator.patch_start_idx
-
-    B, S, _, H, W = images.shape
-    h_patches = H // patch_size
-    w_patches = W // patch_size
-    num_patch_tokens = h_patches * w_patches
-    tokens_per_image = patch_start_idx + num_patch_tokens
-
-    if feat.ndim == 4:
-        # (B,S,T,C)
-        x = feat
-    elif feat.ndim == 3:
-        # (B, S*tpi, C) -> reshape
-        T = feat.shape[1]
-        num_vis = T // tokens_per_image
-        if num_vis < S:
-            raise ValueError(f"[Rep] num_vis < S: S={S}, num_vis={num_vis}. tokens_per_image mismatch?")
-        x = feat[:, :S * tokens_per_image, :].view(B, S, tokens_per_image, -1)
-    else:
-        raise ValueError(f"[Rep] Unexpected feat.ndim={feat.ndim}")
-
-    x = x[:, :, patch_start_idx:, :]  # (B,S,Np,C)
-
-    if global_feat_start:
-        x = x[:, :, :, global_feat_start:]
-
-    f = x.float().mean(dim=2)  # (B,S,C)
-    return f
-
-def _unwrap_module(m: torch.nn.Module) -> torch.nn.Module:
-    while hasattr(m, "module"):
-        m = m.module
-    return m
-
-
-def _minmax_norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-12) -> torch.Tensor:
-    x = x.to(dtype=torch.float32)
-    valid = torch.isfinite(x)
-    has_valid = valid.any(dim=dim, keepdim=True)
-
-    # min/max 只在 valid 上算
-    x_for_min = torch.where(valid, x, torch.full_like(x, float("inf")))
-    x_for_max = torch.where(valid, x, torch.full_like(x, float("-inf")))
-    mn = x_for_min.min(dim=dim, keepdim=True).values
-    mx = x_for_max.max(dim=dim, keepdim=True).values
-
-    denom = mx - mn
-    denom_ok = denom > eps
-
-    # 避免除 0：先随便设个 1，后面 denom_ok 会把无效行置 0
-    denom_safe = torch.where(denom_ok, denom, torch.ones_like(denom))
-
-    y = (x - mn) / denom_safe
-    y = torch.where(valid & has_valid & denom_ok, y, torch.zeros_like(y))
-    return y
-
-def sample_one_set_by_scores_batch_prob(
-    scores: torch.Tensor,            # (B,S)
-    *,
-    k_min: int = 2,
-    k_max: int = 12,
-    mode: str = "keep_bottom",       # keep_top / keep_bottom / random_like
-    must_include_first_last: bool = False,
-    tau: float = 0.4,                # 越小越接近 topk/bottomk
-    eps: float = 0.0,                # 0~0.2 常用：和均匀分布混合一点探索
-    rng = random,                    # 只用来采样 L
-    generator: torch.Generator | None = None,  # 控制 torch.multinomial 的随机性
-) -> torch.Tensor:
-    """
-    同一个 batch 随机一个 L，然后每个样本按自己的 scores[b] 以概率方式采 L 帧（无放回）。
-    return: idx (B,L) long, 升序
-    """
-    B, S = scores.shape
-    if S < 2:
-        raise ValueError(f"S={S} 太短")
-
-    L = rng.randint(max(2, k_min), max(2, k_max))
-    L = max(2, min(L, S))
-
-    fixed = [0]
-    if must_include_first_last and S > 1:
-        fixed.append(S - 1)
-    fixed = sorted(set(fixed))
-    n_fixed = len(fixed)
-
-    if L <= n_fixed:
-        out = torch.tensor(fixed[:L], device=scores.device, dtype=torch.long)[None, :].expand(B, L)
-        return out
-
-    need = L - n_fixed
-
-    # ---- prepare logits ----
-    x = scores.to(torch.float32)
-    # 处理 non-finite
-    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-
-    if mode == "random_like":
-        logits = torch.zeros_like(x)  # softmax -> uniform
-    elif mode == "keep_top":
-        logits = x
-    elif mode == "keep_bottom":
-        logits = -x
-    else:
-        raise ValueError(f"Unknown mode: {mode}")
-
-    # mask out fixed indices
-    mask = torch.ones((B, S), device=scores.device, dtype=torch.bool)
-    for fi in fixed:
-        mask[:, fi] = False
-
-    # 把不能选的置为 -inf
-    logits = logits.masked_fill(~mask, float("-inf"))
-
-    # softmax(prob)
-    tau = max(float(tau), 1e-6)
-    probs = torch.softmax(logits / tau, dim=1)  # (B,S)
-
-    # 可选：混一点 uniform，增强探索
-    if eps > 0:
-        eps = float(eps)
-        uni = mask.to(torch.float32)
-        uni = uni / uni.sum(dim=1, keepdim=True).clamp_min(1.0)
-        probs = (1 - eps) * probs + eps * uni
-
-    # 数值保险：如果某行全 0（极端情况下），退化成 uniform
-    row_sum = probs.sum(dim=1, keepdim=True)
-    bad = row_sum.squeeze(1) <= 0
-    if bad.any():
-        uni = mask.to(torch.float32)
-        uni = uni / uni.sum(dim=1, keepdim=True).clamp_min(1.0)
-        probs[bad] = uni[bad]
-
-    # ---- sample without replacement ----
-    picked = torch.multinomial(probs, num_samples=need, replacement=False, generator=generator)  # (B,need)
-
-    fixed_t = torch.tensor(fixed, device=scores.device, dtype=torch.long)[None, :].expand(B, n_fixed)
-    idx = torch.cat([fixed_t, picked], dim=1)  # (B,L)
-    idx, _ = torch.sort(idx, dim=1)
-    return idx
-
-def sample_one_set_by_scores_batch(
-    scores: torch.Tensor,            # (B,S)
-    *,
-    k_min: int = 2,
-    k_max: int = 12,
-    mode: str = "keep_top",
-    must_include_first_last: bool = False,  # 第一帧永远包含；这里控制是否也包含最后一帧
-    rng = random,
-) -> torch.Tensor:
-    """
-    同一个 batch 随机一个 L，然后每个样本 b 按自己的 scores[b] 选 L 帧。
-    return: idx (B,L) long, 升序（保证时间顺序）
-    """
-    # assert scores.ndim == 2, f"scores must be (B,S), got {tuple(scores.shape)}"
-    B, S = scores.shape
-    if S < 2:
-        raise ValueError(f"S={S} 太短")
-
-    L = rng.randint(max(2, k_min), max(2, k_max))
-    L = max(2, min(L, S))
-
-    fixed = [0]
-    if must_include_first_last and S > 1:
-        fixed.append(S - 1)
-    fixed = sorted(set(fixed))
-    n_fixed = len(fixed)
-
-    # L 太小就只返回 fixed 的前 L 个（每个样本一样）
-    if L <= n_fixed:
-        out = torch.tensor(fixed[:L], device=scores.device, dtype=torch.long).view(1, L).expand(B, L)
-        return out
-
-    need = L - n_fixed
-
-    # 准备 rank 分数（排除 fixed；处理 nan/inf）
-    scores_rank = scores.to(torch.float32)
-
-    # 把 non-finite 变成对当前 mode 不可能被选中的极值
-    if mode == "keep_top":
-        scores_rank = torch.nan_to_num(scores_rank, nan=float("-inf"), posinf=float("inf"), neginf=float("-inf"))
-        largest = True
-    elif mode == "keep_bottom":
-        scores_rank = torch.nan_to_num(scores_rank, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
-        largest = False
-    elif mode == "random_like":
-        # 用随机分数来选
-        scores_rank = torch.rand((B, S), device=scores.device, dtype=torch.float32)
-        largest = True
-    else:
-        raise ValueError(f"Unknown mode: {mode}")
-
-    # 排除 fixed
-    scores_rank = scores_rank.clone()
-    for fi in fixed:
-        if mode == "keep_bottom":
-            scores_rank[:, fi] = float("inf")
-        else:
-            scores_rank[:, fi] = float("-inf")
-
-    # topk / bottomk
-    picked = torch.topk(scores_rank, k=need, dim=1, largest=largest).indices  # (B,need)
-
-    fixed_t = torch.tensor(fixed, device=scores.device, dtype=torch.long).view(1, n_fixed).expand(B, n_fixed)
-    idx = torch.cat([fixed_t, picked], dim=1)  # (B,L)
-
-    # 升序，保持时间顺序
-    idx, _ = torch.sort(idx, dim=1)
-    return idx
-
-@dataclass
-class CropAugConfig:
-    enabled: bool = True
-    scale_min: float = 0.6
-    scale_max: float = 0.9
-    keep_aspect: bool = True
-    resize_back: bool = True
-    img_mode: str = "bilinear"
-    depth_mode: str = "bilinear"
-    conf_mode: str = "bilinear"
-    mask_mode: str = "nearest"
-    align_corners: bool = False  # for bilinear/bicubic
-    min_crop_size: int = 16
-
-def _sample_crop_boxes_per_sample(
-    B: int, H: int, W: int, cfg: CropAugConfig, device: torch.device
-) -> Dict[str, torch.Tensor]:
-    # do_crop mask
-    if not cfg.enabled:
-        do_crop = torch.zeros(B, device=device, dtype=torch.bool)
-    else:
-        do_crop = torch.ones(B, device=device, dtype=torch.bool)
-    
-    # sample scale
-    s = torch.empty(B, device=device).uniform_(cfg.scale_min, cfg.scale_max)
-
-    if cfg.keep_aspect:
-        crop_h = torch.round(torch.tensor(H, device=device) * s).long()
-        crop_w = torch.round(torch.tensor(W, device=device) * s).long()
-    else:
-        sy = torch.empty(B, device=device).uniform_(cfg.scale_min, cfg.scale_max)
-        sx = torch.empty(B, device=device).uniform_(cfg.scale_min, cfg.scale_max)
-        crop_h = torch.round(torch.tensor(H, device=device) * sy).long()
-        crop_w = torch.round(torch.tensor(W, device=device) * sx).long()
-
-    # clamp
-    crop_h = crop_h.clamp(min=cfg.min_crop_size, max=H)
-    crop_w = crop_w.clamp(min=cfg.min_crop_size, max=W)
-
-    # 如果不做 crop，box=full image
-    crop_h = torch.where(do_crop, crop_h, torch.full_like(crop_h, H))
-    crop_w = torch.where(do_crop, crop_w, torch.full_like(crop_w, W))
-
-    # sample top/left（向量化：用 rand * (max+1)）
-    max_top = (H - crop_h).clamp(min=0)
-    max_left = (W - crop_w).clamp(min=0)
-
-    top = torch.floor(torch.rand(B, device=device) * (max_top.to(torch.float32) + 1.0)).long()
-    left = torch.floor(torch.rand(B, device=device) * (max_left.to(torch.float32) + 1.0)).long()
-
-    # resize scales (output is original H,W if resize_back)
-    out_h, out_w = (H, W)
-    sy = out_h / crop_h.to(torch.float32)
-    sx = out_w / crop_w.to(torch.float32)
-
-    return dict(left=left, top=top, crop_w=crop_w, crop_h=crop_h, sx=sx, sy=sy, do_crop=do_crop)
-
-
-def _crop_resize_blchw(
-    x: torch.Tensor,  # (B,L,C,H,W)
-    *,
-    left: torch.Tensor, top: torch.Tensor, crop_w: torch.Tensor, crop_h: torch.Tensor,
-    out_hw: Tuple[int, int],
-    mode: str,
-    align_corners: bool,
-) -> torch.Tensor:
-    assert x.ndim == 5, f"expected (B,L,C,H,W), got {tuple(x.shape)}"
-    B, L, C, H, W = x.shape
-    out_h, out_w = out_hw
-
-    outs = []
-    for b in range(B):
-        l = int(left[b].item()); t = int(top[b].item())
-        cw = int(crop_w[b].item()); ch = int(crop_h[b].item())
-        xb = x[b]  # (L,C,H,W)
-        crop = xb[:, :, t:t+ch, l:l+cw]  # (L,C,ch,cw)
-
-        if (ch != out_h) or (cw != out_w):
-            if mode in ["bilinear", "bicubic"]:
-                crop = F.interpolate(crop, size=(out_h, out_w), mode=mode, align_corners=align_corners)
-            else:
-                crop = F.interpolate(crop, size=(out_h, out_w), mode=mode)
-        outs.append(crop)
-    return torch.stack(outs, dim=0)  # (B,L,C,out_h,out_w)
-
-
-def _crop_resize_blhw(
-    x: torch.Tensor,  # (B,L,H,W)
-    *,
-    left: torch.Tensor, top: torch.Tensor, crop_w: torch.Tensor, crop_h: torch.Tensor,
-    out_hw: Tuple[int, int],
-    mode: str,
-    align_corners: bool,
-    is_mask: bool = False,
-) -> torch.Tensor:
-    assert x.ndim == 4, f"expected (B,L,H,W), got {tuple(x.shape)}"
-    B, L, H, W = x.shape
-    out_h, out_w = out_hw
-
-    x_in = x
-    if is_mask:
-        x_in = x_in.to(torch.float32)
-
-    # add channel dim => (B,L,1,H,W)
-    x_in = x_in.unsqueeze(2)
-
-    outs = []
-    for b in range(B):
-        l = int(left[b].item()); t = int(top[b].item())
-        cw = int(crop_w[b].item()); ch = int(crop_h[b].item())
-        xb = x_in[b]  # (L,1,H,W)
-        crop = xb[:, :, t:t+ch, l:l+cw]  # (L,1,ch,cw)
-
-        if (ch != out_h) or (cw != out_w):
-            if mode in ["bilinear", "bicubic"]:
-                crop = F.interpolate(crop, size=(out_h, out_w), mode=mode, align_corners=align_corners)
-            else:
-                crop = F.interpolate(crop, size=(out_h, out_w), mode=mode)
-        outs.append(crop)
-
-    y = torch.stack(outs, dim=0)  # (B,L,1,out_h,out_w)
-    y = y.squeeze(2)              # (B,L,out_h,out_w)
-
-    if is_mask:
-        y = (y > 0.5)
-    return y
-
-
-def _update_intrinsics_for_crop_resize(
-    K: torch.Tensor,  # (B,L,3,3)
-    *,
-    left: torch.Tensor, top: torch.Tensor,
-    crop_w: torch.Tensor, crop_h: torch.Tensor,
-    out_hw: Tuple[int, int],
-) -> torch.Tensor:
-    """
-    K' 对应：先在原图坐标 crop（left,top,cw,ch），再 resize 到 out_hw。
-    标准 pinhole:
-      fx' = fx * sx
-      fy' = fy * sy
-      cx' = (cx - left) * sx
-      cy' = (cy - top ) * sy
-    """
-    assert K.ndim == 4 and K.shape[-2:] == (3,3), f"K expected (B,L,3,3), got {tuple(K.shape)}"
-    B, L = K.shape[:2]
-    out_h, out_w = out_hw
-
-    # (B,1) broadcast to (B,L)
-    left_f = left.to(K.device).to(torch.float32).view(B, 1)
-    top_f  = top.to(K.device).to(torch.float32).view(B, 1)
-    cw_f   = crop_w.to(K.device).to(torch.float32).view(B, 1)
-    ch_f   = crop_h.to(K.device).to(torch.float32).view(B, 1)
-
-    sx = (float(out_w) / cw_f)  # (B,1)
-    sy = (float(out_h) / ch_f)  # (B,1)
-
-    K2 = K.clone().to(torch.float32)
-
-    fx = K2[:, :, 0, 0]
-    fy = K2[:, :, 1, 1]
-    cx = K2[:, :, 0, 2]
-    cy = K2[:, :, 1, 2]
-
-    fx = fx * sx
-    fy = fy * sy
-    cx = (cx - left_f) * sx
-    cy = (cy - top_f)  * sy
-
-    K2[:, :, 0, 0] = fx
-    K2[:, :, 1, 1] = fy
-    K2[:, :, 0, 2] = cx
-    K2[:, :, 1, 2] = cy
-
-    # 如果你有 skew (0,1) 也可以 scale_x；一般是 0，不改也行：
-    K2[:, :, 0, 1] = K2[:, :, 0, 1] * sx
-
-    return K2.to(dtype=K.dtype)
-
-@dataclass
-class AttnGuidedDropConfig:
-    layer: int = 23
-    attn_a: float = 0.5      # 先默认只用 attention（最稳），feature 可后面再开
-    cos_a: float = 0.5
-    mode: str = "keep_bottom"   # keep_top / keep_bottom / random_like, 保留哪些帧
-    # 如果你确认 aggregated_tokens_list 的 token 维度切分正确，再把 cos_a 调大
-    global_feat_start: Optional[int] = 1024
-
-
-class VGGTAttnGuidedScorer:
-    """
-    从 teacher 的一次 forward 里，抓 q/k，计算每帧 score（相对 anchor=0）。
-    """
-    def __init__(self, model: torch.nn.Module, cfg: AttnGuidedDropConfig):
-        self.model = model
-        self.cfg = cfg
-        self.q_out: Dict[int, torch.Tensor] = {}
-        self.k_out: Dict[int, torch.Tensor] = {}
-
-    def _get_attn_blk(self, core: torch.nn.Module, layer: int):
-        # paper release 代码：self.model.aggregator.global_blocks[i].attn :contentReference[oaicite:10]{index=10}
-        return core.aggregator.global_blocks[layer].attn
-
-    def _install_hooks(self) -> List[Any]:
-        core = _unwrap_module(self.model)
-        layer = self.cfg.layer
-        blk = self._get_attn_blk(core, layer)
-
-        def _make_hook(store: Dict[int, torch.Tensor], idx: int):
-            def _hook(_module, _inp, out):
-                store[idx] = out.detach()
-            return _hook
-
-        handles = []
-        handles.append(blk.q_norm.register_forward_hook(_make_hook(self.q_out, layer)))
-        handles.append(blk.k_norm.register_forward_hook(_make_hook(self.k_out, layer)))
-        return handles
-
-    @torch.no_grad()
-    def forward_and_score_NN(
-        self,
-        images: torch.Tensor,          # (B,S,C,H,W)
-        *,
-        amp_dtype: Optional[torch.dtype] = None,
-        return_aggregated_tokens: bool = False,
-    ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
-        """
-        NxN token-level attention (frame->frame), then reduce to per-frame "incoming" score:
-        attn_mat[i,j] = how much frame-i (as Q) attends to frame-j (as KV)
-
-        ✅ This version REMOVES frame0 from both Q and KV when constructing attn_mat:
-        attn_mat is (S-1)x(S-1) over frames 1..S-1, so frame0 won't dominate.
-        ✅ Returned scores is (B,S) where:
-        scores[:,0] = NaN
-        scores[:,1:] = minmax-normalized incoming scores over frames 1..S-1
-
-        return:
-        preds: teacher output
-        scores: (B,S) float32
-        """
-        self.q_out.clear()
-        self.k_out.clear()
-
-        B, S, C, H, W = images.shape
-        if S < 2:
-            raise ValueError(f"S={S} too short (need >=2)")
-
-        image_hw = (H, W)
-        handles = self._install_hooks()
-
-        if amp_dtype is None:
-            amp_dtype = torch.bfloat16
-
-        # -------- forward (always run, cuda or cpu) --------
-        try:
-            if images.is_cuda:
-                with torch.cuda.amp.autocast(enabled=True, dtype=amp_dtype):
-                    out = self.model(images=images, is_attn=return_aggregated_tokens)
-            else:
-                out = self.model(images=images, is_attn=return_aggregated_tokens)
-        finally:
-            for h in handles:
-                try:
-                    h.remove()
-                except Exception:
-                    pass
-
-        # -------- unpack output --------
-        if isinstance(out, tuple) and len(out) == 2:
-            preds, agg_tokens = out
-        else:
-            preds, agg_tokens = out, None
-
-        # hook not captured -> fallback: NaN at frame0, zeros elsewhere
-        if self.cfg.layer not in self.q_out or self.cfg.layer not in self.k_out:
-            scores_full = torch.zeros((B, S), device=images.device, dtype=torch.float32)
-            scores_full[:, 0] = float("nan")
-            return preds, scores_full
-
-        Q = self.q_out[self.cfg.layer]  # (B, Hh, T, D)
-        K = self.k_out[self.cfg.layer]  # (B, Hh, T, D)
-
-        core = _unwrap_module(self.model)
-        aggregator = core.aggregator
-        patch_size = aggregator.patch_size
-        patch_start_idx = aggregator.patch_start_idx
-
-        h_patches = image_hw[0] // patch_size
-        w_patches = image_hw[1] // patch_size
-        num_patch_tokens = h_patches * w_patches
-        tokens_per_image = patch_start_idx + num_patch_tokens
-
-        # how many images are actually in token sequence
-        T = int(K.shape[-2])
-        num_images_in_seq = T // tokens_per_image
-        num_vis = min(S, num_images_in_seq)
-
-        # keep your strict behavior: refuse padding
-        if num_vis < S:
-            raise ValueError(
-                f"[Score] num_vis < S, refuse to pad. "
-                f"S={S}, num_vis={num_vis}. "
-                f"Likely tokens_per_image mismatch or model truncated frames."
-            )
-
-        Hh = int(Q.shape[1])
-        D  = int(Q.shape[-1])
-
-        Tk = int(num_vis * tokens_per_image)
-        # (B,Hh,Tk,D)
-        K_flat = K[:, :, :Tk, :]
-        Q_flat = Q[:, :, :Tk, :]
-
-        # reshape into per-frame blocks
-        # (B,Hh,num_vis,tpi,D)
-        K_blk = K_flat.view(B, Hh, num_vis, tokens_per_image, D)
-        Q_blk = Q_flat.view(B, Hh, num_vis, tokens_per_image, D)
-
-        # -----------------------------
-        # ✅ drop frame0 from BOTH Q and KV
-        # -----------------------------
-        # keep frames [1..num_vis-1]
-        if num_vis <= 1:
-            scores_full = torch.zeros((B, S), device=images.device, dtype=torch.float32)
-            scores_full[:, 0] = float("nan")
-            return preds, scores_full
-
-        K_blk_wo0 = K_blk[:, :, 1:, :, :]                       # (B,Hh,S2,tpi,D)
-        Q_blk_wo0 = Q_blk[:, :, 1:, :, :]                       # (B,Hh,S2,tpi,D)
-        S2 = num_vis - 1
-
-        K_flat_wo0 = K_blk_wo0.reshape(B, Hh, S2 * tokens_per_image, D)  # (B,Hh,S2*tpi,D)
-
-        scale = 1.0 / math.sqrt(float(D))
-
-        # (B,S2,S2): row=query frame (i+1), col=key frame (j+1)
-        attn_mat = torch.empty((B, S2, S2), device=images.device, dtype=torch.float32)
-
-        for i in range(S2):
-            # q_i: (B,Hh,Np,D) for frame (i+1) patch queries
-            q_i = Q_blk_wo0[:, :, i, patch_start_idx:patch_start_idx + num_patch_tokens, :]
-
-            logits = torch.einsum("bhqd,bhtd->bhqt", q_i, K_flat_wo0) * scale  # (B,Hh,Np,S2*tpi)
-            probs  = torch.softmax(logits, dim=-1)
-
-            # average over heads & query patches -> (B, S2*tpi)
-            attn_all = probs.mean(dim=1).mean(dim=1).to(torch.float32)
-
-            # (B,S2,tpi) -> take key-frame patch tokens -> mean over key patches -> (B,S2)
-            attn_blocks = attn_all.view(B, S2, tokens_per_image)
-            patch_block = attn_blocks[:, :, patch_start_idx:patch_start_idx + num_patch_tokens]  # (B,S2,Np)
-            attn_mat[:, i, :] = patch_block.mean(dim=-1)  # (B,S2)
-
-        # ---- reduce NxN -> per-frame incoming score (B,S2) ----
-        eye = torch.eye(S2, device=attn_mat.device, dtype=torch.bool).unsqueeze(0)  # (1,S2,S2)
-        attn_no_self = attn_mat.masked_fill(eye, 0.0)
-
-        attn_scores_wo0 = attn_no_self.sum(dim=1) / max(1, (S2 - 1))  # (B,S2)
-        attn_n_wo0 = _minmax_norm(attn_scores_wo0, dim=1)             # (B,S2)
-
-        # ---- cosine branch (also drop frame0 for consistency) ----
-        cos_n_wo0 = torch.zeros_like(attn_n_wo0)
-
-        if (self.cfg.cos_a > 0) and (agg_tokens is not None):
-            try:
-                feat = agg_tokens[self.cfg.layer]
-                # breakpoint()
-
-                if feat.ndim == 4:
-                    # expected (B,S,T,C) in your heuristic; we only keep frames 1..S-1
-                    feat_bstc = feat[:, 1:, :, :]  # (B,S2,T,C)
-
-                    if (self.cfg.global_feat_start is not None) and (feat_bstc.shape[-1] > self.cfg.global_feat_start):
-                        feat_bstc = feat_bstc[:, :, :, self.cfg.global_feat_start:]
-
-                    if feat_bstc.shape[2] > patch_start_idx:
-                        feat_bstc = feat_bstc[:, :, patch_start_idx:, :]
-
-                    # (B,S2,C): per-frame vector
-                    feat_mean = feat_bstc.float().mean(dim=2)
-                    feat_mean = F.normalize(feat_mean, p=2, dim=-1)
-
-                    # (B,S2,S2): cosine similarity
-                    cos_mat = torch.matmul(feat_mean, feat_mean.transpose(1, 2))
-
-                    eye2 = torch.eye(S2, device=cos_mat.device, dtype=torch.bool).unsqueeze(0)
-                    cos_no_self = cos_mat.masked_fill(eye2, 0.0)
-                    cos_scores_wo0 = cos_no_self.sum(dim=1) / max(1, (S2 - 1))  # (B,S2)
-                    cos_n_wo0 = _minmax_norm(cos_scores_wo0, dim=1)
-            except Exception:
-                pass
-
-        # ---- mix branches and re-pack to (B,S) with frame0=NaN ----
-        scores_wo0 = (self.cfg.attn_a * attn_n_wo0 + self.cfg.cos_a * cos_n_wo0).to(torch.float32)  # (B,S2)
-
-        scores_full = torch.full((B, S), float("nan"), device=images.device, dtype=torch.float32)
-        scores_full[:, 1:] = scores_wo0  # frame0 stays NaN
-
-        return preds, scores_full, agg_tokens
-
-def sample_jittered_fixed(
-    S: int,
-    L: int,
-    *,
-    rng,
-    max_jitter: Optional[int] = 1,  # 抖动幅度（每个点的偏移），若为 None 则用 min(1, step-1)
-) -> List[int]:
-    """
-    先按等间距(step)取 L 个索引，再对每个点随机抖动（幅度 < step），
-    最后排序、去重并智能挪位，保证返回恰好 L 个唯一索引，范围 [0, S-1]。
-    """
-    if S < 2:
-        raise ValueError(f"S={S} 太短")
-    L = max(2, min(L, S))
-
-    # ----- 选择 step：从 min(allowed_min_step, 3), 4, 5, ..., allowed_max_step 中抽一个 -----
-    # allowed_max_step 由长度约束给出：1 + (L-1)*step <= S  => step <= (S-1)//(L-1)
-    allowed_max_step = max(1, (S - 1) // (L - 1))
-    s_low = 3
-    if s_low > allowed_max_step:
-        step = allowed_max_step
-    else:
-        candidates = [s for s in range(s_low, allowed_max_step + 1)]
-        if not candidates:
-            # 无法满足时退化为尽量均匀的离散等间距（差 0/1）
-            return _fixed_equal_with_endpoints(S, L, rng=rng)
-
-        step = rng.choice(candidates)
-
-    # 起点 start，确保能放下 L 帧：need = 1 + (L-1)*step
-    need = 1 + (L - 1) * step
-    start_hi = S - need
-    start = rng.randint(0, max(0, start_hi))
-
-    # 基础等间距序列
-    base = [start + i * step for i in range(L)]
-
-    # 抖动：幅度必须 < step
-    if max_jitter is None:
-        jitter_max = min(1, step - 1)
-    else:
-        jitter_max = min(max(0, max_jitter), max(0, step - 1))
-
-    if jitter_max > 0:
-        jittered = [min(S - 1, max(0, x + rng.randint(-jitter_max, jitter_max))) for x in base]
-    else:
-        jittered = base[:]
-
-    jittered[0] = 0
-    # 排序、去重 + 冲突解决，保证唯一且数量为 L
-    seq = _resolve_collisions(jittered, S, step, rng)
-    # 若还不够（极少数情况），从余下位置补齐
-    if len(seq) < L:
-        pool = [i for i in range(S) if i not in seq]
-        rng.shuffle(pool)
-        seq += pool[: (L - len(seq))]
-
-    seq = sorted(seq)[:L]
-    return seq
-
-
-def _resolve_collisions(seq: List[int], S: int, step: int, rng) -> List[int]:
-    """
-    对于重复值，向左右就近空位“挪位”。
-    优先在距离小、且不越界的位置落点；如果 step>1，则最大挪动范围默认到 step。
-    """
-    used = set()
-    out: List[int] = []
-
-    # 帮助函数：给一个目标 t，找最近的空位
-    def place_near(t: int) -> Optional[int]:
-        if t not in used and 0 <= t < S:
-            return t
-        max_nudge = max(1, step - 1)  # 抖动允许 < step；挪位也别超过这个范围更稳妥
-        # 按距离从近到远、左右交替尝试
-        for d in range(1, max_nudge + 1):
-            left  = t - d
-            right = t + d
-            pick_order = []
-            # 随机决定先尝试左还是右，避免系统性偏差
-            if rng.random() < 0.5:
-                pick_order = [left, right]
-            else:
-                pick_order = [right, left]
-            for cand in pick_order:
-                if 0 <= cand < S and cand not in used:
-                    return cand
-        return None
-
-    for x in sorted(seq):
-        spot = place_near(x)
-        if spot is not None:
-            used.add(spot)
-            out.append(spot)
-        # 若找不到，就暂时跳过，后面统一补齐
-
-    return out
-
-
-def _fixed_equal_with_endpoints(S: int, L: int, *, rng) -> List[int]:
-    """离散意义下的最均匀等间距：间隔差不超过 1，且覆盖 [0, S-1]。"""
-    L = max(2, min(L, S))
-    if L == 2:
-        return [0, S - 1]
-    n_gaps = L - 1
-    total = S - 1
-    base = total // n_gaps
-    rem  = total % n_gaps
-    long_pos = set(rng.sample(range(n_gaps), rem)) if rem > 0 else set()
-    seq = [0]
-    acc = 0
-    for i in range(n_gaps):
-        gap = base + (1 if i in long_pos else 0)
-        acc += gap
-        seq.append(acc)
-    return seq
-
-def _choose_strategy(rng, p_fixed: float = 0.3) -> str:
-    """随机返回 'fixed' 或 'random；p_fixed 是 fixed-interval 的概率。"""
-    return "fixed" if rng.random() < p_fixed else "random"
-
-def sample_one_set(
-    S: int,
-    k_min: int = 2,
-    k_max: int = 6,
-    *,
-    strategy: str = "random",     # 这里我们让 "random" 采用“首尾 + 中间随机”方案
-    must_include_first_last: bool = True,
-    rng = random,
-) -> List[int]:
-    if S < 2:
-        raise ValueError(f"S={S} 太短")
-
-    L = rng.randint(max(2, k_min), max(2, k_max))
-    L = max(2, min(L, S))  # 不超过 S
-
-    if strategy == "random":
-        if not must_include_first_last:
-            pool_start, pool_end = 1, max(1, S)  # 半开区间 [1, S-1)
-            pool = list(range(pool_start, pool_end))
-            m = min(L - 1, len(pool))
-            mids = rng.sample(pool, k=m)
-            return [0] + sorted(mids)
-
-        if L == 2:
-            return [0, S - 1]
-        pool_start, pool_end = 1, max(1, S - 1)  # 半开区间 [1, S-1)
-        pool = list(range(pool_start, pool_end))
-        m = min(L - 2, len(pool))
-        mids = rng.sample(pool, k=m)
-        return [0] + sorted(mids) + [S - 1]
-
-    if strategy == "fixed":
-        return sample_jittered_fixed(S, L, rng=rng, max_jitter=1)
-
-
-def _gather_BS(x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """
-    x:  (B,S,...)  idx: (B,L)
-    out:(B,L,...)
-    """
-    assert x.ndim >= 2
-    B, S = x.shape[:2]
-    assert idx.ndim == 2 and idx.shape[0] == B
-    L = idx.shape[1]
-
-    view_shape = (B, L) + (1,) * (x.ndim - 2)
-    expand_shape = (B, L) + x.shape[2:]
-    idx_exp = idx.view(view_shape).expand(expand_shape)
-    return x.gather(dim=1, index=idx_exp)
-
-def sample_mixed_baseline_by_scores_batch(
-    scores: torch.Tensor,            # (B,S)
-    *,
-    k_min: int = 2,
-    k_max: int = 12,
-    mode: str = "keep_top",          # keep_top | keep_bottom | random_like
-    rng=random,
-) -> torch.Tensor:
-    """
-    Mixed baseline sampling (batch):
-      - Always include: endpoints {0, S-1} (global baseline)
-      - Always include: one near-neighbor pair {t, t+1} (local continuity)
-      - Fill remaining slots by keep_top/keep_bottom/random_like on scores
-
-    Returns:
-      idx: (B,L) long, sorted ascending
-    """
-    assert scores.ndim == 2, f"scores must be (B,S), got {tuple(scores.shape)}"
-    B, S = scores.shape
-    device = scores.device
-
-    if S < 2:
-        raise ValueError(f"S={S} too short")
-
-    # need at least 4 frames to satisfy {0,S-1} + {t,t+1} without overlap
-    # if S < 4, we just fall back to "use all frames" (or as many as L allows)
-    min_req = 4 if S >= 4 else S
-
-    # draw L once per batch (same as your original design)
-    L = rng.randint(max(2, k_min, min_req), max(2, k_max, min_req))
-    L = max(min_req, min(L, S))
-
-    # ---- construct fixed indices ----
-    if S >= 4:
-        # choose t in [1, S-3] so that {t,t+1} is interior and never overlaps endpoints
-        # torch.randint high is exclusive => [1, S-2) == {1, ..., S-3}
-        t = torch.randint(1, S - 2, (B,), device=device, dtype=torch.long)
-
-        fixed = torch.stack([
-            torch.zeros((B,), device=device, dtype=torch.long),          # 0
-            t,                                                          # t
-            t + 1,                                                      # t+1
-            torch.full((B,), S - 1, device=device, dtype=torch.long),    # S-1
-        ], dim=1)  # (B,4)
-
-        fixed, _ = torch.sort(fixed, dim=1)  # ascending
-    else:
-        # S==2 or 3: can't have both pairs; simplest stable fallback: use all frames
-        fixed = torch.arange(S, device=device, dtype=torch.long).view(1, S).expand(B, S)
-        # L == S in this case due to min_req
-        return fixed[:, :L]
-
-    n_fixed = fixed.shape[1]  # 4
-    need = L - n_fixed
-    if need <= 0:
-        return fixed[:, :L]  # if L==4, just return baseline
-
-    # ---- rank scores and exclude fixed positions ----
-    scores_rank = scores.to(torch.float32)
-
-    if mode == "keep_top":
-        # keep large; make NaN impossible to be picked
-        scores_rank = torch.nan_to_num(scores_rank, nan=float("-inf"), posinf=float("inf"), neginf=float("-inf"))
-        largest = True
-        fill_value = float("-inf")
-    elif mode == "keep_bottom":
-        # keep small; make NaN impossible to be picked
-        scores_rank = torch.nan_to_num(scores_rank, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
-        largest = False
-        fill_value = float("inf")
-    elif mode == "random_like":
-        scores_rank = torch.rand((B, S), device=device, dtype=torch.float32)
-        largest = True
-        fill_value = float("-inf")
-    else:
-        raise ValueError(f"Unknown mode: {mode}")
-
-    scores_rank = scores_rank.clone()
-    # scatter fill to exclude fixed indices for each sample
-    scores_rank.scatter_(1, fixed, fill_value)
-
-    # ---- fill remaining slots ----
-    picked = torch.topk(scores_rank, k=need, dim=1, largest=largest).indices  # (B,need)
-
-    idx = torch.cat([fixed, picked], dim=1)  # (B,L)
-    idx, _ = torch.sort(idx, dim=1)
-    return idx
-
-def build_seq_from_indices_batch(
-    teacher_out: Dict[str, Any],
-    batch_in: Dict[str, Any],
-    indices: torch.Tensor,            # (B,L)
-    prune_ratio: float = 0.05,
-) -> Dict[str, Any]:
-    """
-    indices: (B,L) 每个样本自己的帧选择
-    """
-    device = batch_in["images"].device
-    idx = indices.to(device=device, dtype=torch.long)
-
-    out: Dict[str, Any] = {}
-
-    # 1) 从 batch_in gather
-    for k in ["images", "ids", "images_aug", "images_aug2"]:
-        if k in batch_in and torch.is_tensor(batch_in[k]) and batch_in[k].ndim >= 2:
-            out[k] = _gather_BS(batch_in[k], idx)
-        elif k in batch_in:
-            out[k] = batch_in[k]
-
-    # 2) 从 teacher_out gather pose/depth/conf
-    t_pose  = _gather_BS(teacher_out["pose_enc"],  idx)          # (B,L,9)
-    t_depth = _gather_BS(teacher_out["depth"],     idx)          # (B,L,H,W,1)
-    t_conf  = _gather_BS(teacher_out["depth_conf"],idx)          # (B,L,H,W)
-
-    extrinsic, intrinsic = pose_encoding_to_extri_intri(t_pose, out["images"].shape[-2:])
-    out["extrinsics"] = extrinsic
-    out["intrinsics"] = intrinsic
-    out["depth_conf"] = t_conf
-
-    depths = t_depth.squeeze(-1)                                 # (B,L,H,W)
-    out["depths"] = depths
-    mask_depth = torch.isfinite(depths) & (depths > 0)
-
-    if prune_ratio > 0.0:
-        B, L, H, W = t_conf.shape
-        conf_flat = t_conf.reshape(B, -1)
-
-        try:
-            q = torch.nanquantile(conf_flat, prune_ratio, dim=-1, keepdim=True)
-        except AttributeError:
-            q = torch.quantile(torch.nan_to_num(conf_flat, nan=float("-inf")),
-                               prune_ratio, dim=-1, keepdim=True)
-
-        mask_conf_flat = conf_flat >= q
-        mask_conf = mask_conf_flat.view(B, L, H, W)
-        point_masks = (mask_depth & mask_conf).to(torch.bool)
-    else:
-        point_masks = mask_depth.to(torch.bool)
-
-    out["point_masks"] = point_masks
-    return out
-
-def _slice_pred_dict(pred, L_sup: int, L_total: int):
-    """
-    把 pred 里所有 “第1维是序列长度且等于 L_total” 的 Tensor，切成 [:, :L_sup]
-    同时递归处理 list/tuple/dict。
-    """
-    if torch.is_tensor(pred):
-        # 只切那些形状 (B, L_total, ...) 的张量
-        if pred.dim() >= 2 and pred.size(1) == L_total:
-            return pred[:, :L_sup]
-        return pred
-
-    if isinstance(pred, dict):
-        return {k: _slice_pred_dict(v, L_sup, L_total) for k, v in pred.items()}
-
-    if isinstance(pred, (list, tuple)):
-        out = [_slice_pred_dict(v, L_sup, L_total) for v in pred]
-        return type(pred)(out)
-
-    # 其他类型（float/int/None/str...）原样返回
-    return pred
-
-def _sample_dis_imgs(dis_imgs: torch.Tensor, L_sup: int) -> torch.Tensor:
-    """
-    dis_imgs: (B, D, C, H, W)
-    return:   (B, L_sup, C, H, W)  从 D 里随机取 L_sup；如果 D < L_sup，就有放回采样补齐
-    """
-    B, D, C, H, W = dis_imgs.shape
-    if D == 0:
-        # 没有 distractor，就返回空（上层会跳过）
-        return dis_imgs
-
-    if D >= L_sup:
-        # 无放回：对整个 batch 用同一组 idx（简单且快）
-        idx = torch.randperm(D, device=dis_imgs.device)[:L_sup]
-        return dis_imgs.index_select(1, idx)
-    else:
-        # 有放回：采样 L_sup 个索引
-        idx = torch.randint(0, D, (L_sup,), device=dis_imgs.device)
-        # 用 gather 做 batch 对齐
-        idx_g = idx.view(1, L_sup, 1, 1, 1).expand(B, L_sup, C, H, W)
-        return dis_imgs.gather(1, idx_g)
+from train_utils.rep_loss import _rep_feature_loss, _frame_rep_from_agg_tokens
+from train_utils.crop_aug import (
+    CropAugConfig,
+    _sample_crop_boxes_per_sample,
+    _crop_resize_blchw,
+    _crop_resize_blhw,
+    _update_intrinsics_for_crop_resize,
+)
+from train_utils.attn_scorer import AttnGuidedDropConfig, VGGTAttnGuidedScorer
+from train_utils.frame_sampling import (
+    sample_one_set_by_scores_batch_prob,
+    sample_one_set_by_scores_batch,
+    sample_jittered_fixed,
+    sample_one_set,
+    build_seq_from_indices_batch,
+    _choose_strategy,
+)
 
 class Trainer:
     """
@@ -1181,9 +171,9 @@ class Trainer:
         self.p_fixed_interval = p_fixed_interval
         self.attn_drop_cfg = AttnGuidedDropConfig(
             layer=23,
-            attn_a=0.5,   # 先只用 attention
+            attn_a=0.5,   # use attention only initially
             cos_a=0.5,
-            mode=keep_mode,  # sanity check：再跑 keep_bottom / random_like 对照
+            mode=keep_mode,  # also run keep_bottom / random_like for ablation
         )
         
         crop_scale_min: float = 0.6
@@ -1245,23 +235,23 @@ class Trainer:
 
         # Wrap the model with DDP
         self._setup_ddp_distributed_training(distributed, device)
-        # DDP 之后创建 EMA
+        # Create EMA after DDP wrapping
         if getattr(self.optim_conf, "ema", None) and getattr(self.optim_conf.ema, "enabled", False):
             decay = float(self.optim_conf.ema.decay)
             base = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
             self.ema_model = AveragedModel(base, multi_avg_fn=get_ema_multi_avg_fn(decay))
-            # 如从断点恢复，尝试把 EMA 权重也恢复
+            # If resuming from a checkpoint, also try to restore EMA weights
             if self._last_loaded_ckpt_path is not None:
                 try:
                     with g_pathmgr.open(self._last_loaded_ckpt_path, "rb") as f:
                         _ckpt = torch.load(f, map_location="cpu")
                     if "ema_model" in _ckpt and _ckpt["ema_model"] is not None:
                         self.ema_model.load_state_dict(_ckpt["ema_model"])
-                        print("EMA state fouded, loading EMA weight.")
+                        print("EMA state found, loading EMA weight.")
                 except Exception as _:
                     logging.warning("EMA state not found or failed to load; will re-build EMA during training.")
             
-            # Mean-Teacher：把 EMA 模型作为 teacher 使用
+            # Mean-Teacher: use the EMA model as the teacher
             self.teacher = self.ema_model
             self.teacher.eval()
             for p in self.teacher.parameters():
@@ -1273,13 +263,14 @@ class Trainer:
 
     def _apply_crop_aug(self, batch: Dict[str, Any], phase: str) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         """
-        对 student 输入的 images/images_aug 做 crop+resize，并同步变换 depths/depth_conf/point_masks/intrinsics。
-        返回 crop_meta 方便你 debug/log。
+        Apply crop+resize augmentation to student images/images_aug,
+        and synchronously transform depths/depth_conf/point_masks/intrinsics.
+        Returns crop_meta for debugging/logging.
         """
         if (phase != "train") or (not getattr(self, "crop_cfg", None)) or (not self.crop_cfg.enabled):
             return batch, None
 
-        # 选一个参考图确定 H,W（通常 images_aug 存在）
+        # determine H,W from a reference image (images_aug when available)
         ref_key = "images_aug" if ("images_aug" in batch and torch.is_tensor(batch["images_aug"])) else "images"
         if ref_key not in batch or (not torch.is_tensor(batch[ref_key])) or batch[ref_key].ndim != 5:
             return batch, None
@@ -1363,8 +354,8 @@ class Trainer:
         mode: str,
     ):
         """
-        写 jsonl 到 frame_selection_debug.txt
-        只在 rank0 且 step%log_freq==0 时调用
+        Write jsonl to frame_selection_debug.txt.
+        Called only on rank0 when step % log_freq == 0.
         """
         if self.rank != 0:
             return
@@ -1389,7 +380,7 @@ class Trainer:
         if torch.is_tensor(ids) and ids.ndim == 2 and ids.shape[0] == B and ids.shape[1] == S:
             stu_ids = _gather_BS(ids, indices)  # (B,L)
 
-        # 写入（每个 sample 一行）
+        # write one line per sample
         with open(path, "a", encoding="utf-8") as f:
             for b in range(B):
                 name_b = seq_names[b] if isinstance(seq_names, (list, tuple)) else str(seq_names)
@@ -1439,17 +430,17 @@ class Trainer:
         step: Optional[int] = None,
     ):
         """
-        计算 DDP 全局 grad L2 norm（sqrt(sum_all_ranks(sum(g^2))))，并 log 到 TB。
-        ⚠️ 关键：collective 必须所有 rank 都调用；只在 rank0 写 TB。
-        建议在 scaler.unscale_() 之后调用，反映真实 grad。
+        Compute the DDP global grad L2 norm (sqrt(sum_all_ranks(sum(g^2)))) and log to TB.
+        IMPORTANT: collective calls must be made on every rank; only rank0 writes to TB.
+        Call after scaler.unscale_() so gradients reflect their true values.
         """
         if step is None:
             step = int(self.steps.get(phase, 0))
 
-        # 如果你想降频（比如每10步一次），这个条件也必须所有 rank 一致：
+        # To reduce log frequency (e.g. every 10 steps), this condition must be consistent across ranks:
         # do_log = (step % 10 == 0)
         # if not do_log: return
-        # （不要把 do_log 放到 rank0 里单独判断）
+        # (do NOT evaluate do_log inside a rank0-only branch)
 
         device = self.device
         sq = torch.zeros((), device=device, dtype=torch.float32)
@@ -1467,18 +458,18 @@ class Trainer:
             finite = torch.isfinite(g)
             nonfinite += (~finite).sum().to(torch.float32)
 
-            # 只对 finite 的 grad 计入平方和，避免 nan/inf 污染，同时避免 nan_to_num 的全量拷贝
+            # only include finite grads in the sum-of-squares to avoid nan/inf contamination
             g32 = g.float()
             g32 = torch.where(finite, g32, torch.zeros_like(g32))
             sq += (g32 * g32).sum()
 
-        # DDP 汇总：所有 rank 都必须参与
+        # DDP all-reduce: all ranks must participate
         if dist.is_available() and dist.is_initialized():
             dist.reduce(sq, dst=0, op=dist.ReduceOp.SUM)
             dist.reduce(nonfinite, dst=0, op=dist.ReduceOp.SUM)
             dist.reduce(total, dst=0, op=dist.ReduceOp.SUM)
 
-        # 只在 rank0 写 TB
+        # only rank0 writes to TB
         if self.rank == 0:
             gn = torch.sqrt(sq).item()
             nf = (nonfinite / total.clamp(min=1)).item()
@@ -1492,10 +483,10 @@ class Trainer:
         teacher_conf: Optional[torch.Tensor],   # (B,L,H,W) or (B,S,H,W) or (...,1)
         tag_prefix: str = "Conf/teacher",
         step: Optional[int] = None,
-        log_quantiles: bool = False,            # quantile 精确但稍慢；需要可以关掉
+        log_quantiles: bool = False,            # quantiles are exact but slightly slower; disable if needed
     ):
         """
-        不做随机采样，直接对所有像素做统计（deterministic & exact）。
+        Compute statistics over all pixels directly (deterministic and exact, no random sampling).
         """
         if self.rank != 0:
             return
@@ -1524,7 +515,7 @@ class Trainer:
         mn   = x.min().item()
         mx   = x.max().item()
 
-        # 这些是“反映分布形状”的 cheap but exact 指标
+        # cheap but exact distribution-shape indicators
         frac_lt_0p1 = (x < 0.1).float().mean().item()
         frac_gt_0p9 = (x > 0.9).float().mean().item()
         frac_lt_0p01 = (x < 0.01).float().mean().item()
@@ -1542,7 +533,7 @@ class Trainer:
         self.tb_writer.log(f"{tag_prefix}/frac_lt_0p01", float(frac_lt_0p01), int(step))
         self.tb_writer.log(f"{tag_prefix}/frac_gt_0p99", float(frac_gt_0p99), int(step))
 
-        # 可选：精确分位数（deterministic，但会更慢一点）
+        # optional: exact quantiles (deterministic but slightly slower)
         if log_quantiles:
             qs = torch.quantile(x, torch.tensor([0.05, 0.50, 0.95], device=x.device))
             q05, q50, q95 = [t.item() for t in qs]
@@ -1556,12 +547,12 @@ class Trainer:
         phase: str,
         teacher_depth_conf: Optional[torch.Tensor],  # (B,S,H,W) or (B,S,...) float
         indices: torch.Tensor,                       # (B,L)
-        scores: torch.Tensor,                        # (B,S)  用来定义 top/bottom
+        scores: torch.Tensor,                        # (B,S)  used to define top/bottom
         mode: str,
         k: int = 5,
     ):
         """
-        TB 记录（以 score 排序为准）：
+        TB logging (ranked by score):
         1) all frames mean depth_conf
         2) student selected mean depth_conf
         3) top-k(score) frames mean depth_conf
@@ -1602,7 +593,7 @@ class Trainer:
         # ---- top/bottom-k(score) mean ----
         sc = scores.detach().float()
         if sc.shape[0] != B or sc.shape[1] != S:
-            # shape mismatch，直接不记 top/bottom
+            # shape mismatch: skip top/bottom logging
             top_mean = torch.tensor(float("nan"), device=conf.device)
             bot_mean = torch.tensor(float("nan"), device=conf.device)
             k_eff = min(k, S)
@@ -1630,13 +621,13 @@ class Trainer:
         self.tb_writer.log(f"Conf/teacher_depth_conf_top{k_eff}_by_score_mean", top_f, step)
         self.tb_writer.log(f"Conf/teacher_depth_conf_bottom{k_eff}_by_score_mean", bot_f, step)
 
-        # ratios（更直观）
+        # ratios (more intuitive for monitoring)
         denom = all_f if (all_f == all_f and abs(all_f) > 1e-12) else 1e-12
         self.tb_writer.log(f"Conf/ratio_selected_over_all", sel_f / denom, step)
         self.tb_writer.log(f"Conf/ratio_top{k_eff}_over_all_by_score", top_f / denom, step)
         self.tb_writer.log(f"Conf/ratio_bottom{k_eff}_over_all_by_score", bot_f / denom, step)
 
-        # gap（可选，但很有用）
+        # gap (optional but useful for monitoring selection quality)
         if top_f == top_f and bot_f == bot_f:
             self.tb_writer.log(f"Conf/gap_top{k_eff}_minus_bottom{k_eff}_by_score", top_f - bot_f, step)
         if sel_f == sel_f and bot_f == bot_f:
@@ -1727,10 +718,10 @@ class Trainer:
 
         # ===== Rep-matching (BYOL-style) minimal add-on =====
         self.rep_layers = [4, 11, 17, 23]         # ✅ DPT multi-scale layers
-        self.rep_loss_w = 0.01                    # 建议 0.01~0.1 sweep
-        # self.rep_loss_kind = "cosine_smoothl1"  # 如果你想更强约束可用这个
+        self.rep_loss_w = 0.01                    # suggested sweep range: 0.01~0.1
+        # self.rep_loss_kind = "cosine_smoothl1"  # stronger constraint; use if needed
         self.rep_smoothl1_beta = 0.05
-        self.rep_mix_alpha = 0.5                  # cosine_smoothl1 的混合系数
+        self.rep_mix_alpha = 0.5                  # mixing coefficient for cosine_smoothl1
         self.rep_global_feat_start = 0
 
 
@@ -1804,19 +795,6 @@ class Trainer:
             d = d[..., 0]
         return d
 
-    def _log_dist_tb(self, prefix: str, x: torch.Tensor | None, step: int):
-        if self.rank != 0:
-            return
-        if x is None or (not torch.is_tensor(x)) or x.numel() == 0:
-            self.tb_writer.log(f"{prefix}/mean", float("nan"), step)
-            self.tb_writer.log(f"{prefix}/p50",  float("nan"), step)
-            self.tb_writer.log(f"{prefix}/p90",  float("nan"), step)
-            return
-        x = x.float()
-        self.tb_writer.log(f"{prefix}/mean", float(x.mean().item()), step)
-        self.tb_writer.log(f"{prefix}/p50",  float(torch.quantile(x, 0.50).item()), step)
-        self.tb_writer.log(f"{prefix}/p90",  float(torch.quantile(x, 0.90).item()), step)
-
     def _make_point_mask_from_conf(self, depth: torch.Tensor, depth_conf: torch.Tensor | None, prune_ratio: float):
         """
         depth: (B,L,H,W) float
@@ -1841,9 +819,9 @@ class Trainer:
 
     def _geom_pack(self, out_dict: dict, images: torch.Tensor, prune_ratio: float = 0.05):
         """
-        用 teacher 的输出（pose_enc/depth/depth_conf）构造 extrinsics/intrinsics/depths/point_masks
-        并做 normalize（与你训练一致）。
-        Return: (E, K, D, point_masks) 或 (None,None,None,None)
+        Build extrinsics/intrinsics/depths/point_masks from teacher outputs (pose_enc/depth/depth_conf)
+        and normalize them consistently with training.
+        Returns: (E, K, D, point_masks) or (None, None, None, None)
         """
         if out_dict is None:
             return None, None, None, None
@@ -1857,13 +835,13 @@ class Trainer:
         D = self._squeeze_depth(depth)  # (B,L,H,W)
         B, L, H, W = D.shape
 
-        # pose_enc -> extr/intri (与你 build_seq 一致)
+        # pose_enc -> extr/intri (consistent with build_seq)
         E, K = pose_encoding_to_extri_intri(pose, images.shape[-2:])  # (B,L,3,4), (B,L,3,3)
         # E = self._w2c_to_4x4(E_w2c)
         
         point_masks = self._make_point_mask_from_conf(D, conf, prune_ratio=prune_ratio)
 
-        # normalize (与你训练一致)
+        # normalize (consistent with training)
         with torch.no_grad():
             cam_pts, world_pts, _ = lift_depth_to_cam_world_points_torch(
                 depths=D, extrinsics=E, intrinsics=K
@@ -2074,7 +1052,7 @@ class Trainer:
         denom   = valid.flatten(2).sum(-1)                                            # (B,L)
 
         out = rel_sum / denom.clamp_min(1.0)
-        # frames with denom==0 => NaN (更诚实，避免被当成0)
+        # frames with denom==0 => NaN (honest: avoids treating as 0)
         out = torch.where(denom > 0, out, torch.full_like(out, float("nan")))
         return out
     @torch.no_grad()
@@ -2190,7 +1168,7 @@ class Trainer:
 
     def _get_val_refmask_dir(self) -> str:
         """
-        优先用 data.val.save_mask_dir；没有就默认写到 log_dir/exp_name 下。
+        Use data.val.save_mask_dir if set; otherwise default to log_dir/exp_name.
         """
         val_conf = None
         if isinstance(self.data_conf, dict):
@@ -2208,16 +1186,16 @@ class Trainer:
 
     def _refmask_path(self, ref_dir: str, seq_name: str, ids_1d: torch.Tensor) -> str:
         """
-        一个 sample(=一个 seq + 一个 frameset(ids)) 对应一个 mask 文件。
+        One mask file per sample (= one sequence + one frame set).
         """
-        key_ids = self._hash_ids(ids_1d)   # 你已经实现了
+        key_ids = self._hash_ids(ids_1d)
         key = f"{self._safe_key(seq_name)}_{key_ids}"
         return osp.join(ref_dir, f"{key}.npz")
 
     def _save_refmask_npz(self, path: str, mask_ref: torch.Tensor, ids_1d: torch.Tensor, anchor: int = 0):
         """
-        mask_ref: (L-1, H, W) bool on CPU or GPU
-        用 packbits 压缩存，体积很小。
+        mask_ref: (L-1, H, W) bool on CPU or GPU.
+        Stored with packbits compression for compact files.
         """
         m = mask_ref.detach().to("cpu")
         assert m.ndim == 3, f"mask_ref must be (L-1,H,W), got {m.shape}"
@@ -2256,7 +1234,7 @@ class Trainer:
         is_ref_run: bool,
         seq_name: str,
         ids_1d: torch.Tensor,                 # (L,)
-        out_ref_b: dict,                      # 单个 sample 的 output dict (B=1)
+        out_ref_b: dict,                      # output dict for a single sample (B=1)
         images_b: torch.Tensor,               # (1,L,C,H,W)
         anchor: int = 0,
         prune_ratio: float = 0.05,
@@ -2265,8 +1243,8 @@ class Trainer:
         dist_cap: float | None = None,
     ) -> torch.Tensor:
         """
-        - 如果 ref_dir 不存在 => is_ref_run=True => 强制生成并保存
-        - 否则：若文件存在就 load；不存在则补算并保存
+        - If ref_dir does not exist => is_ref_run=True => force-build and save.
+        - Otherwise: load if file exists; build and save if it does not.
         """
         path = self._refmask_path(ref_dir, seq_name, ids_1d)
 
@@ -2275,11 +1253,11 @@ class Trainer:
             return m
 
         # ---- build from current model outputs (reference) ----
-        # 这里用 teacher_geom_pack 保证 E/K/D 和训练一致（含 normalize）
+        # use _geom_pack to ensure E/K/D are consistent with training (including normalization)
         E, K, D, point_masks = self._geom_pack(out_ref_b, images_b, prune_ratio=prune_ratio)
         E = self._w2c_to_4x4(E)
 
-        # 生成 anchor-space 的 ref mask: (L-1,H,W) bool
+        # build anchor-space reference mask: (L-1,H,W) bool
         m = self._build_refmask_anchor0_from_ref_geom(
             D=D, K=K, E=E, point_masks=point_masks,
             anchor=anchor, occ_rel=occ_rel, outlier_q=outlier_q, dist_cap=dist_cap
@@ -2358,50 +1336,6 @@ class Trainer:
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
     
-    def _latest_ckpt_for_epoch(self) -> str:
-        """优先返回 checkpoint_{epoch}.pt，其次 checkpoint.pt（若存在）"""
-        ckpt_dir = self.checkpoint_conf.save_dir
-        ckpt_def = os.path.join(ckpt_dir, "checkpoint.pt")
-        if os.path.isfile(ckpt_def):
-            return ckpt_def
-        return None
-
-    def _run_external_eval(self, ckpt_path: str, model_name: str) -> None:
-        """仅在 rank0 调用 bash eval/video_depth/run.sh 进行评测"""
-        if self.rank != 0:
-            return
-        project_root = "/mnt/data/haven_berkeley/framedrop/vggt"  # 或者写死到你的仓库根目录
-        script_path = os.path.join(project_root, "eval/video_depth/run.sh")
-        if not os.path.isfile(script_path):
-            logging.error(f"[Eval] Script not found: {script_path}")
-            return
-        
-        # 为本次评测单独建个日志文件
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = os.path.join(project_root, "eval", "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, f"eval_{model_name}_{ts}.log")
-        log_file = open(log_path, "w")  # 交给子进程写
-
-        env = os.environ.copy()
-        env["MODEL_WEIGHTS"] = os.path.join(project_root, "training", ckpt_path)
-        env["MODEL_NAME"] = model_name
-
-        logging.info(f"[Eval] Spawning non-blocking eval for {model_name} | ckpt={ckpt_path} | log={log_path}")
-        try:
-            p = subprocess.Popen(
-                ["bash", script_path],
-                cwd=project_root,
-                env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,     # 新会话，避免被父进程信号干扰
-                close_fds=True,             # 与父进程解耦
-            )
-            logging.info(f"[Eval] Spawned PID={p.pid} (detached).")
-        except Exception:
-            logging.exception("[Eval] Failed to spawn eval process.")
-
     def run_train(self):
         """Runs the main training loop over all epochs."""
         while self.epoch < self.max_epochs:
@@ -2708,13 +1642,6 @@ class Trainer:
         }
         _append_csv_row(summary_csv, row)
 
-        # (optional) also keep TB logging (won't be reliable for offline sweeps if step repeats)
-        # self._log_dist_tb("Val/geo_teacher_3ddist_refmask", geoT, 0)
-        # self._log_dist_tb("Val/geo_teacher_validfrac_refmask", geoTk, 0)
-        # self._log_dist_tb("Val/geo_student_3ddist_refmask", geoS, 0)
-        # self._log_dist_tb("Val/geo_student_validfrac_refmask", geoSk, 0)
-        # self._log_dist_tb("Val/teacher_student_depth_absrel", ts_all, 0)
-
         return True
 
     def train_epoch(self, train_loader):        
@@ -2769,10 +1696,6 @@ class Trainer:
             # measure data loading time
             data_time.update(time.time() - end)
             data_times.append(data_time.val)
-
-            
-            # with torch.cuda.amp.autocast(enabled=False):
-            #     batch = self._process_batch(batch)
 
             batch = copy_data_to_device(batch, self.device, non_blocking=True)
 
@@ -2832,7 +1755,7 @@ class Trainer:
 
                 do_log = (self.steps[phase] % self.logging_conf.log_freq == 0)
 
-                # 1) clip 前全局 norm
+                # 1) global norm before clipping
                 if do_log:
                     self._tb_log_global_grad_norm(
                         phase=phase,
@@ -2843,7 +1766,7 @@ class Trainer:
 
                 grad_norm_dict = self.gradient_clipper(model=self.model)
 
-                # 2) clip 后全局 norm
+                # 2) global norm after clipping
                 if do_log:
                     self._tb_log_global_grad_norm(
                         phase=phase,
@@ -2856,15 +1779,15 @@ class Trainer:
             for optim in self.optims:   
                 self.scaler.step(optim.optimizer)
             self.scaler.update()
-            # EMA 紧随权重更新
+            # Update EMA immediately after each optimizer step
             if self.ema_model is not None:
                 base = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
-                self.ema_model.update_parameters(base)  # 官方推荐：step 后立即更新
-            
+                self.ema_model.update_parameters(base)
+
             # === log objective once per optimizer update (rank0 only) ===
             if (objective_mean is not None) and (self.rank == 0):
-                # 由于 self.steps[train] 是每个 chunk +1，这里用整除把它映射回 “optimizer step”
-                opt_step = (self.steps[phase] // accum_steps) - 1  # 第一次更新是 0
+                # self.steps[train] increments per chunk; divide to get optimizer step
+                opt_step = (self.steps[phase] // accum_steps) - 1  # first update is step 0
                 if opt_step % self.logging_conf.log_freq == 0:
                     self.tb_writer.log("Values/train/objective_optstep", float(objective_mean), int(opt_step))
 
@@ -2929,14 +1852,6 @@ class Trainer:
                             amp_dtype=amp_type,
                             return_aggregated_tokens=True,
                         )
-                        # indices = sample_mixed_baseline_by_scores_batch(
-                        #     scores=scores,
-                        #     k_min=4,
-                        #     k_max=12,
-                        #     mode=self.attn_drop_cfg.mode,  # keep_top / keep_bottom / random_like
-                        #     rng=random,
-                        # )
-
                         B, S = scores.shape
                         if not self.drop:
                             # ablation-only
@@ -2950,8 +1865,8 @@ class Trainer:
                                     k_max=self.drop_max,
                                     mode=self.attn_drop_cfg.mode,   # keep_top / keep_bottom / random_like
                                     must_include_first_last=False,
-                                    tau=self.prob_tau,        # 建议先 0.1~0.5 试
-                                    eps=0,# 可选：0.0~0.1
+                                    tau=self.prob_tau,        # suggested initial range: 0.1~0.5
+                                    eps=0,  # optional: 0.0~0.1
                                     rng=random,
                                 )
                             else:
@@ -2963,7 +1878,7 @@ class Trainer:
                                     must_include_first_last=False,
                                     rng=random,
                                 )
-                        # ✅ 1) txt 记录：哪些帧 score 低/高，teacher frames vs student frames
+                        # 1) txt log: which frames have low/high scores, teacher vs student frames
                         self._log_frame_selection_txt(
                             phase=phase,
                             chunked_batch=chunked_batch,
@@ -2972,7 +1887,7 @@ class Trainer:
                             mode=self.attn_drop_cfg.mode,
                         )
 
-                        # ✅ 2) TB 统计：keep_bottom 选中帧的 depth_conf 均值 vs 全帧均值
+                        # 2) TB stats: mean depth_conf of selected frames vs all frames
                         self._tb_log_depth_conf_stats(
                             phase=phase,
                             teacher_depth_conf=t_out.get("depth_conf", None),
@@ -3005,16 +1920,16 @@ class Trainer:
             
             chunk_2f = build_seq_from_indices_batch(t_out, chunked_batch, indices)
             
-            # --- Crop augmentation (student harder) ---
-            # 注意：这会同步 crop images/images_aug + depths/conf/masks + K->K'
-            if getattr(self, "crop_cfg", None) and self.crop_cfg.enabled and (phase == "train"):
-                # 如果你开了 rep_enabled：teacher_fs 来自未 crop 的 teacher token，会有 domain mismatch。
-                # 建议先别同时开 rep_enabled + crop，或者后面再做“teacher 也跑 crop”来对齐。
+            # --- Crop augmentation (harder student input) ---
+            # Synchronously crops images/images_aug + depths/conf/masks + K->K'
+            if getattr(self, “crop_cfg”, None) and self.crop_cfg.enabled and (phase == “train”):
+                # When rep_enabled: teacher_fs comes from un-cropped teacher tokens -> domain mismatch.
+                # Avoid enabling rep_enabled + crop simultaneously, or align by also cropping teacher.
                 if not self.rep_enabled:
                     chunk_2f, crop_meta = self._apply_crop_aug(chunk_2f, phase=phase)
                 else:
                     crop_meta = None
-            # chunk_2f 已经有: depths / extrinsics / intrinsics / point_masks
+            # chunk_2f already has: depths / extrinsics / intrinsics / point_masks
             with torch.no_grad():
                 cam_pts, world_pts, point_mask = lift_depth_to_cam_world_points_torch(
                     depths=chunk_2f["depths"],
@@ -3106,55 +2021,9 @@ class Trainer:
         return (obj_sum / obj_cnt) if obj_cnt > 0 else None
 
 
-    def _apply_batch_repetition(self, batch: Mapping) -> Mapping:
-        """
-        Applies a data augmentation by concatenating the original batch with a
-        flipped version of itself.
-        """
-        tensor_keys = [
-            "images", "depths", "extrinsics", "intrinsics", 
-            "cam_points", "world_points", "point_masks", 
-        ]        
-        string_keys = ["seq_name"]
-        
-        for key in tensor_keys:
-            if key in batch:
-                original_tensor = batch[key]
-                batch[key] = torch.concatenate([original_tensor, 
-                                                torch.flip(original_tensor, dims=[1])], 
-                                                dim=0)
-        
-        for key in string_keys:
-            if key in batch:
-                batch[key] = batch[key] * 2
-        
-        return batch
-
-    def _process_batch(self, batch: Mapping):      
-        if self.data_conf.train.common_config.repeat_batch:
-            batch = self._apply_batch_repetition(batch)
-        
-        # Normalize camera extrinsics and points. The function returns new tensors.
-        normalized_extrinsics, normalized_cam_points, normalized_world_points, normalized_depths = \
-            normalize_camera_extrinsics_and_points_batch(
-                extrinsics=batch["extrinsics"],
-                cam_points=batch["cam_points"],
-                world_points=batch["world_points"],
-                depths=batch["depths"],
-                point_masks=batch["point_masks"],
-            )
-
-        # Replace the original values in the batch with the normalized ones.
-        batch["extrinsics"] = normalized_extrinsics
-        batch["cam_points"] = normalized_cam_points
-        batch["world_points"] = normalized_world_points
-        batch["depths"] = normalized_depths
-
-        return batch
-    
     def _step(self, batch, model: nn.Module, phase: str, loss_meters: dict, dis_imgs=None):
         """
-        dis_imgs: (B, L_dis, C, H, W)  —— 你自己从 dataset / collate 拿到的 distractor
+        dis_imgs: (B, L_dis, C, H, W)  -- distractor images from the dataset/collate
         """
         if self.aug:
             sup_imgs = batch["images_aug"]  # (B, L_sup, C, H, W)
@@ -3290,53 +2159,4 @@ class Trainer:
 
 
 
-def chunk_batch_for_accum_steps(batch: Mapping, accum_steps: int) -> List[Mapping]:
-    """Splits a batch into smaller chunks for gradient accumulation."""
-    if accum_steps == 1:
-        return [batch]
-    return [get_chunk_from_data(batch, i, accum_steps) for i in range(accum_steps)]
 
-def is_sequence_of_primitives(data: Any) -> bool:
-    """Checks if data is a sequence of primitive types (str, int, float, bool)."""
-    return (
-        isinstance(data, Sequence)
-        and not isinstance(data, str)
-        and len(data) > 0
-        and isinstance(data[0], (str, int, float, bool))
-    )
-
-def get_chunk_from_data(data: Any, chunk_id: int, num_chunks: int) -> Any:
-    """
-    Recursively splits tensors and sequences within a data structure into chunks.
-
-    Args:
-        data: The data structure to split (e.g., a dictionary of tensors).
-        chunk_id: The index of the chunk to retrieve.
-        num_chunks: The total number of chunks to split the data into.
-
-    Returns:
-        A chunk of the original data structure.
-    """
-    if isinstance(data, torch.Tensor) or is_sequence_of_primitives(data):
-        # either a tensor or a list of primitive objects
-        # assert len(data) % num_chunks == 0
-        start = (len(data) // num_chunks) * chunk_id
-        end = (len(data) // num_chunks) * (chunk_id + 1)
-        return data[start:end]
-    elif isinstance(data, Mapping):
-        return {
-            key: get_chunk_from_data(value, chunk_id, num_chunks)
-            for key, value in data.items()
-        }
-    elif isinstance(data, str):
-        # NOTE: this is a hack to support string keys in the batch
-        return data
-    elif isinstance(data, Sequence):
-        return [get_chunk_from_data(value, chunk_id, num_chunks) for value in data]
-    else:
-        return data
-
-def append_jsonl(path, row):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
