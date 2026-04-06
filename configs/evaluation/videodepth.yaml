@@ -1,0 +1,29 @@
+# @package _global_
+
+defaults:
+  - override /data: depth
+
+name: robo_videodepth_pretrain
+
+pi3:
+  pretrained_model_name_or_path: /home/ed25519/code/vggt/ckpt/model.pt
+  # pretrained_model_name_or_path: /home/ed25519/code/vggt/training/logs/game_augonly/ckpts/checkpoint_9.pt
+eval_datasets:
+  # - sintel
+  # - bonn
+  # - kitti
+  # - gamegeo
+  - gamevideo
+  # - droid
+
+# align: scale
+align: scale&shift
+
+overwrite: True
+no_crop: False
+load_img_size: 512
+
+device: cuda
+
+verbose: False
+save_suffix: null

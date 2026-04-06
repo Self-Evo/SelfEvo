@@ -1,0 +1,28 @@
+# @package _global_
+
+defaults:
+  - override /data: relpose-angular
+
+name: debug
+
+vggt:
+  # pretrained_model_name_or_path: yyfz233/Pi3
+  pretrained_model_name_or_path: /home/ed25519/code/vggt/ckpt/model.pt
+  use_ema: true
+
+eval_datasets:
+  # - OmniGeo
+  # - OmniVideo
+  - Re10K
+  # - CO3Dv2
+
+no_crop: False
+load_img_size: 512
+
+device: cuda
+
+verbose: False
+
+seed: 42
+
+save_suffix: null

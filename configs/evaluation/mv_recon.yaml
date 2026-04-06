@@ -1,0 +1,29 @@
+# @package _global_
+
+defaults:
+  - override /data: mv_recon
+
+name: mv_recon_stunodrop2
+
+pi3:
+  pretrained_model_name_or_path: /mnt/data/haven_berkeley/framedrop/vggt/training/logs/stunodrop/ckpts/checkpoint_2.pt
+  # pretrained_model_name_or_path: checkpoints/Pi3
+
+eval_datasets:
+  - 7scenes-sparse
+  - 7scenes-dense
+  - NRGBD-sparse
+  - NRGBD-dense
+  # - DTU
+  # - ETH3D
+
+no_crop: False
+load_img_size: 518
+
+device: cuda
+
+verbose: False
+
+seed: 42
+
+save_suffix: null

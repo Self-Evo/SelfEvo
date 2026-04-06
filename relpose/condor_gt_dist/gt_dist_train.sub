@@ -1,0 +1,13 @@
+executable = /is/cluster/fast/groups/ps-pbrgaussians/Uncharted4d/data/Un4D-all/eval/relpose/condor_gt_dist/run_worker.sh
+arguments  = $(session)
+
+error  = /is/cluster/fast/groups/ps-pbrgaussians/Uncharted4d/data/Un4D-all/eval/relpose/condor_gt_dist/logs/$(session).err
+output = /is/cluster/fast/groups/ps-pbrgaussians/Uncharted4d/data/Un4D-all/eval/relpose/condor_gt_dist/logs/$(session).out
+log    = /is/cluster/fast/groups/ps-pbrgaussians/Uncharted4d/data/Un4D-all/eval/relpose/condor_gt_dist/logs/$(session).log
+
+request_gpus   = 0
+request_memory = 8000
+request_cpus   = 1
+request_disk   = 5G
+
+queue session from /is/cluster/fast/groups/ps-pbrgaussians/Uncharted4d/data/Un4D-all/eval/relpose/condor_gt_dist/session_list.txt

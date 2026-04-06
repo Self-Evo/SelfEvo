@@ -1,0 +1,127 @@
+kitti:
+  type: video  # with sequences of video
+  root_path: /home/nan.huang/data/eval/monst3r/data/kitti/depth_selection/val_selection_cropped
+  ls_all_seqs: ${data.kitti.root_path}/image_gathered
+  img:
+    path: ${data.kitti.root_path}/image_gathered/{seq}
+    ext: png
+  depth:
+    path: ${data.kitti.root_path}/groundtruth_depth_gathered/{seq}
+    ext: png
+  sparse: false 
+
+hoi4d:
+  type: video
+  sparse: true
+  eval_gap: 10
+  ls_all_seqs: /home/nan.huang/data/hoi4d/test_50.csv
+  seq_col: "Annotation Path"
+  img:
+    path: /home/nan.huang/data/hoi4d/HOI4D_release/images/{seq}
+    ext: png
+  depth:
+    path: /home/nan.huang/data/hoi4d/OmniWorld-HOI4D/{seq}/prior_depth
+    ext: png
+
+droid:
+  type: video
+  format: droid
+  eval_gap: 10
+  frames_root: /home/nan.huang/data/OmniWorld-DROID_benchmark/DROID_png_frames
+  anno_root: /home/nan.huang/data/OmniWorld-DROID_benchmark/depths   # parent of all subsets
+  subset_glob: omniworld_droid_*    # or subset_list: [omniworld_droid_5000_5049, ...]
+  metadata_csv: /home/nan.huang/data/OmniWorld-DROID_random/omniworld_droid_metadata.csv
+  ext_keep_indices: [1, 2]          # optional: keep only ext1 -> [1], only ext2 -> [2]
+  img: { ext: png }
+  depth: { ext: png }
+  only_fixed_views: false            # keep ext cams only, drop wrist
+  only_wrist_views: true
+  # seq_cache_file: /home/nan.huang/data/OmniWorld-DROID_benchmark/cache/droid_fixed_ext12_seqs.json
+  # seq_cache_file: /home/nan.huang/data/OmniWorld-DROID_benchmark/cache/droid_all_ext12_seqs.json
+  seq_cache_file: /home/nan.huang/data/OmniWorld-DROID_benchmark/cache/droid_wrist_ext12_seqs.json
+  refresh_seq_cache: false   # 想强制重建就设 true
+  max_seqs: 200          # 想要多少就写多少；不写/<=0 就不采样
+  seq_sample_seed: 42    # 固定随机种子
+  sparse: True
+
+gamegeo:
+  type: video  # with sequences of video
+  root_path: /home/nan.huang/data/OmniWorld/benchmark
+  ls_all_seqs: ${data.gamegeo.root_path}/geometric_prediction
+  sparse: True
+  eval_gap: 10
+  img:
+    path: ${data.gamegeo.root_path}/geometric_prediction/{seq}/image
+    ext: png
+  depth:
+    path: ${data.gamegeo.root_path}/geometric_prediction/{seq}/depth
+    ext: npy
+
+gamevideo:
+  type: video  # with sequences of video
+  root_path: /home/nan.huang/data/OmniWorld/benchmark
+  ls_all_seqs: ${data.gamevideo.root_path}/video_generation
+  sparse: True
+  eval_gap: 10
+  img:
+    path: ${data.gamevideo.root_path}/video_generation/{seq}/image
+    ext: png
+  depth:
+    path: ${data.gamevideo.root_path}/video_generation/{seq}/depth
+    ext: npy
+
+bonn:
+  type: video
+  sparse: false 
+  root_path: /home/nan.huang/data/eval/monst3r/data/bonn/rgbd_bonn_dataset
+  ls_all_seqs:
+    - rgbd_bonn_balloon2
+    - rgbd_bonn_crowd2
+    - rgbd_bonn_crowd3
+    - rgbd_bonn_person_tracking2
+    - rgbd_bonn_synchronous
+  img:
+    path: ${data.bonn.root_path}/{seq}/rgb_110
+    ext: png
+  depth:
+    path: ${data.bonn.root_path}/{seq}/depth_110
+    ext: png
+
+sintel:
+  type: video
+  sparse: false 
+  root_path: /home/nan.huang/data/eval/monst3r/data/sintel/training
+  ls_all_seqs:
+    - alley_2
+    - ambush_4
+    - ambush_5
+    - ambush_6
+    - cave_2
+    - cave_4
+    - market_2
+    - market_5
+    - market_6
+    - shaman_3
+    - sleeping_1
+    - sleeping_2
+    - temple_2
+    - temple_3
+  img:
+    path: ${data.sintel.root_path}/final/{seq}
+    ext: png
+  depth:
+    path: ${data.sintel.root_path}/depth/{seq}
+    ext: dpt
+  # anno:
+  #   path: ${data.sintel.root_path}/camdata_left
+
+nyu-v2:
+  type: mono  # only a set of images, without sequences
+  root_path: /home/ed25519/data/eval/nyu_v2/val
+  sparse: false 
+  img:
+    path: ${data.nyu-v2.root_path}/nyu_images
+    ext: png
+  depth:
+    path: ${data.nyu-v2.root_path}/nyu_depths
+    ext: npy

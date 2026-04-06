@@ -1,0 +1,54 @@
+Re10K:
+  cfg:
+    _target_: re10k.Re10KDataset
+    Re10K_DIR: /home/ed25519/data/re10k/re10k/test
+    seq_file: /home/ed25519/data/re10k/sequences/re10k_test_1719.txt
+    cache_file: /home/ed25519/data/re10k/dataset_cache/re10k_relpose_test1719_cache.npy
+  sampling:
+    strategy: random_order
+    num_frames: 10
+  seq_id_map: /home/ed25519/data/re10k/seq-id-maps/Re10K_relpose_seq-id-map_seed${seed}.json
+  metric_thresholds: [5, 15, 30]
+
+hoi4d:
+  cfg:
+    _target_: hoi4d.HOI4DCameraDataset
+    images_root: /home/nan.huang/data/hoi4d/HOI4D_release/images
+    anno_root: /home/nan.huang/data/hoi4d/OmniWorld-HOI4D
+    test_csv: /home/nan.huang/data/hoi4d/test_50.csv
+    seq_col: "Annotation Path"
+    img_ext: png
+    debug: false
+  sparse: true
+  rot_only: true
+  sparse_divisor: 10
+  metric_thresholds: [5, 15, 30]
+
+OmniGeo:
+  cfg:
+    _target_: omnigeo.OmniGeoDataset
+    OmniGeo_DIR: /home/nan.huang/data/OmniWorld/benchmark/geometric_prediction
+  metric_thresholds: [5, 15, 30]
+  sparse: True
+
+
+OmniVideo:
+  cfg:
+    _target_: omnivideo.OmniVideoDataset
+    OmniVideo_DIR: /home/nan.huang/data/OmniWorld/benchmark/video_generation
+  metric_thresholds: [5, 15, 30]
+  sparse: True
+
+
+CO3Dv2:
+  cfg:
+    _target_: co3d_v2.Co3dDataset
+    CO3D_DIR: /mnt/data/haven_berkeley/projects/video_data/co3dv2
+    # CO3D_ANNOTATION_DIR: data/co3dv2/annotations
+    CO3D_ANNOTATION_DIR: /mnt/data/haven_berkeley/projects/video_data/co3dv2_anno
+    categories: all
+  sampling:
+    strategy: random_order
+    num_frames: 10
+  seq_id_map: /home/ed25519/data/re10k/seq-id-maps/CO3Dv2_relpose_seq-id-map_seed${seed}.json
+  metric_thresholds: [5, 15, 30]
