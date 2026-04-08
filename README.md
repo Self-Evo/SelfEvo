@@ -40,34 +40,6 @@ pip install -e .
 pip install -r requirements_demo.txt
 ```
 
-## Pretrained Models
-
-**Base VGGT-1B** (pretrained):
-
-```python
-from huggingface_hub import hf_hub_download
-hf_hub_download(repo_id="facebook/VGGT-1B", filename="model.pt", local_dir="ckpt/")
-```
-
-Or via CLI:
-```bash
-huggingface-cli download facebook/VGGT-1B model.pt --local-dir ckpt/
-```
-
-**SelfEvo (VGGT)** — self-improved checkpoint:
-
-```python
-from huggingface_hub import hf_hub_download
-hf_hub_download(repo_id="Changearthmore/SelfEvoVGGT", filename="model.pt", local_dir="ckpt/selfevo/")
-```
-
-Or via CLI:
-```bash
-huggingface-cli download Changearthmore/SelfEvoVGGT model.pt --local-dir ckpt/selfevo/
-```
-
-Update `checkpoint.resume_checkpoint_path` in your config to point to the downloaded checkpoint.
-
 ## Interactive Demo
 
 Try the interactive Gradio demo on your own images or videos.
@@ -87,12 +59,12 @@ For 3D visualization with [Viser](https://viser.studio/):
 
 **Pretrained VGGT-1B:**
 ```bash
-python demo_viser.py --model facebook/VGGT-1B --image_folder examples/drift-chicane/
+python demo_viser.py --model facebook/VGGT-1B --image_folder examples/drift-straight/
 ```
 
 **SelfEvo (self-improved):**
 ```bash
-python demo_viser.py --model Changearthmore/SelfEvoVGGT --image_folder examples/drift-chicane/
+python demo_viser.py --model Changearthmore/SelfEvoVGGT --image_folder examples/drift-straight/
 ```
 
 ## Data Preparation

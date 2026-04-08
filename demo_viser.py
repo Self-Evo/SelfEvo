@@ -82,8 +82,8 @@ def viser_wrapper(
 
     # Unpack prediction dict
     images = pred_dict["images"]  # (S, 3, H, W)
-    world_points_map = pred_dict["world_points"]  # (S, H, W, 3)
-    conf_map = pred_dict["world_points_conf"]  # (S, H, W)
+    # world_points_map = pred_dict["world_points"]  # (S, H, W, 3)
+    # conf_map = pred_dict["world_points_conf"]  # (S, H, W)
 
     depth_map = pred_dict["depth"]  # (S, H, W, 1)
     depth_conf = pred_dict["depth_conf"]  # (S, H, W)
