@@ -113,29 +113,10 @@ torchrun --nproc_per_node=<NUM_GPUS> launch.py \
 |------|---------|-------------|
 | `drop` | `True` | Enable frame dropping (core asymmetry mechanism) |
 | `drop_max` | `12` | Max frames to drop from the teacher's sequence |
-| `optim.ema.enabled` | `True` | Enable EMA teacher |
 | `optim.ema.decay` | `0.995` | EMA decay rate |
 | `optim.frozen_module_names` | `["*camera_head*"]` | Modules to freeze during training |
-| `optim.optimizer.lr` | `1e-5` | Learning rate |
-| `max_epochs` | `20` | Total training epochs |
-| `aug` | `False` | Apply color jitter augmentation to student |
-| `attn_drop_enabled` | `False` | Use attention-guided frame selection (random by default) |
-| `rep_enabled` | `False` | Add representation-level distillation loss |
-| `accum_steps` | `1` | Gradient accumulation steps (increase if OOM) |
 
  See `training/config/default.yaml` for the full configuration.
-
-## Configuration Reference
-
-The primary config is at `training/config/default.yaml`. It uses [Hydra](https://hydra.cc/) for configuration management. Key config groups:
-
-- **`data`** — train/val dataset paths and dataloader settings
-- **`model`** — VGGT model with enabled tasks (camera, depth, point, track)
-- **`optim`** — EMA, optimizer (AdamW), LR scheduler (cosine with warmup), frozen modules, AMP (bfloat16)
-- **`loss`** — Per-task loss weights and types (camera: L1 × 5.0; depth: gradient loss × 1.0)
-- **`checkpoint`** — Save directory, save frequency, resume path
-- **`logging`** — TensorBoard logger, log directory, metric keys
-- **`distributed`** — DDP backend (NCCL), timeout, bucket size
 
 ## Evaluation
 
