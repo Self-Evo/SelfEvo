@@ -2,9 +2,9 @@
 
 [**Arxiv**](https://arxiv.org/abs/2604.08532) | [**Website**](https://self-evo.github.io/) | [**SelfEvo Model**](https://huggingface.co/Changearthmore/SelfEvoVGGT)
 
-**[Nan Huang](https://nnanhuang.github.io/)<sup>1,2,\*</sup>, [Pengcheng Yu](https://github.com/yupengchengg147)<sup>2,4,\*</sup>, [Weijia Zeng](https://fantasticoven2.github.io/)<sup>6</sup>, [James M. Rehg](https://rehg.org/)<sup>1</sup>, [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/)<sup>5</sup>, [Haiwen Feng](https://havenfeng.github.io/)<sup>2,5,†</sup>, [Qianqian Wang](https://qianqianwang68.github.io/)<sup>3,†</sup>**
+**[Nan Huang](https://nnanhuang.github.io/)<sup>1,2,\*</sup>, [Pengcheng Yu](https://github.com/yupengchengg147)<sup>2,4,\*</sup>, [Weijia Zeng](https://fantasticoven2.github.io/)<sup>6</sup>, [James M. Rehg](https://rehg.org/)<sup>1</sup>, [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/)<sup>5</sup>, [Haiwen Feng](https://havenfeng.github.io/)<sup>2,5,†</sup>, [Qianqian Wang](https://qianqianwang68.github.io/)<sup>2, 3,†</sup>**
 
-<sup>1</sup>UIUC &nbsp; <sup>2</sup>Impossible Inc. &nbsp; <sup>3</sup>Harvard &nbsp; <sup>4</sup>Max Planck Institute &nbsp; <sup>5</sup>UC Berkeley &nbsp; <sup>6</sup>UBC
+<sup>1</sup>UIUC &nbsp; <sup>2</sup>Impossible Research &nbsp; <sup>3</sup>Harvard &nbsp; <sup>4</sup>Max Planck Institute for Intelligent Systems &nbsp; <sup>5</sup>UC Berkeley &nbsp; <sup>6</sup>UBC
 
 <sup>\*</sup>Equal contribution &nbsp; <sup>†</sup>Equal advising
 
