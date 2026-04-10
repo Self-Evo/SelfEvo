@@ -1,6 +1,6 @@
 # SelfEvo: Self-Improving 4D Perception via Self-Distillation
 
-[**Arxiv**](#citation) | [**Website**](https://self-evo.github.io/) | [**SelfEvo Model**](https://huggingface.co/Changearthmore/SelfEvoVGGT)
+[**Arxiv**](https://arxiv.org/abs/2604.08532) | [**Website**](https://self-evo.github.io/) | [**SelfEvo Model**](https://huggingface.co/Changearthmore/SelfEvoVGGT)
 
 **[Nan Huang](https://nnanhuang.github.io/)<sup>1,2,\*</sup>, [Pengcheng Yu](https://github.com/yupengchengg147)<sup>2,4,\*</sup>, [Weijia Zeng](https://fantasticoven2.github.io/)<sup>6</sup>, [James M. Rehg](https://rehg.org/)<sup>1</sup>, [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/)<sup>5</sup>, [Haiwen Feng](https://havenfeng.github.io/)<sup>2,5,†</sup>, [Qianqian Wang](https://qianqianwang68.github.io/)<sup>3,†</sup>**
 
@@ -128,9 +128,14 @@ Evaluation scripts for video depth and camera estimation will be released soon.
 If you find this work useful, please cite:
 
 ```bibtex
-@inproceedings{selfevo2026,
-  title     = {Self-Improving 4D Perception via Self-Distillation},
-  year      = {2026},
+@misc{huang2026selfimproving4dperceptionselfdistillation,
+      title={Self-Improving 4D Perception via Self-Distillation}, 
+      author={Nan Huang and Pengcheng Yu and Weijia Zeng and James M. Rehg and Angjoo Kanazawa and Haiwen Feng and Qianqian Wang},
+      year={2026},
+      eprint={2604.08532},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2604.08532}, 
 }
 ```
 
@@ -147,6 +152,6 @@ We build on [VGGT](https://github.com/facebookresearch/vggt); please also cite:
 
 ## License and Acknowledgments
 
-This project is released under the VGGT License — see [LICENSE.txt](LICENSE.txt) for details.
+This project is released under the VGGT License.
 
 We thank the authors of [VGGT](https://github.com/facebookresearch/vggt) for their excellent codebase. We also thank the maintainers of [OmniWorld](https://arxiv.org/abs/2509.12201), [BEDLAM2.0](https://bedlam.is.tue.mpg.de/), and [DROID](https://droid-dataset.github.io/) for providing the datasets used in this work.
